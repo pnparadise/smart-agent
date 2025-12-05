@@ -14,7 +14,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.io.File
 import java.io.IOException
 
 class MainActivity : FlutterActivity() {
@@ -61,13 +60,10 @@ class MainActivity : FlutterActivity() {
                     if (prepareIntent != null) {
                         startActivityForResult(prepareIntent, VPN_REQUEST_CODE)
                     } else {
-                        startTunnel(file)
+                        SmartConfigRepository.toggleManualTunnel(file, true)
                     }
                 } else {
-                    val intent = Intent(this, SmartAgent::class.java).apply {
-                        action = SmartAgent.ACTION_STOP_TUNNEL
-                    }
-                    startService(intent)
+                    SmartConfigRepository.toggleManualTunnel(file, false)
                 }
             }
         )
@@ -109,8 +105,11 @@ class MainActivity : FlutterActivity() {
             if (resultCode == RESULT_OK) {
                 val file = pendingTunnelFile
                 pendingTunnelFile = null
-                if (file != null) startTunnel(file)
-                else startService(Intent(this, SmartAgent::class.java))
+                if (file != null) {
+                    SmartConfigRepository.toggleManualTunnel(file, true)
+                } else {
+                    startService(Intent(this, SmartAgent::class.java))
+                }
             } else {
                 pendingTunnelFile = null
                 MessageBridge.send("VPN 权限未授予")
@@ -197,13 +196,5 @@ class MainActivity : FlutterActivity() {
             }
         }
         return null
-    }
-
-    private fun startTunnel(file: String) {
-        val intent = Intent(this, SmartAgent::class.java).apply {
-            action = SmartAgent.ACTION_START_TUNNEL
-            putExtra(SmartAgent.EXTRA_TUNNEL_FILE, file)
-        }
-        startForegroundService(intent)
     }
 }

@@ -96,19 +96,6 @@ class FlutterBridge(
                 val file = call.argument<String>("file")
                 val active = call.argument<Boolean>("active") ?: false
                 if (file != null) {
-                    val currentState = VpnStateRepository.vpnState.value
-                    val fromTunnel = currentState.tunnelName ?: "直连"
-                    
-                    val toTunnel = if (active) {
-                        SmartConfigRepository.getTunnels().find { it["file"] == file }?.get("name") ?: file
-                    } else "直连"
-                    
-                    SmartConfigRepository.logEvent(
-                        SmartConfigRepository.EventType.MANUAL,
-                        fromTunnel,
-                        toTunnel
-                    )
-                    
                     onToggleVpn(file, active)
                     result.success(null)
                 } else {

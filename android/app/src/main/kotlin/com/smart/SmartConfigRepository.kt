@@ -209,6 +209,47 @@ object SmartConfigRepository {
         maybeRestartVpnForAppRule(newConfig)
     }
 
+    fun toggleManualTunnel(targetFile: String?, active: Boolean) {
+        val tunnels = getTunnels()
+        val resolvedFile = when {
+            active && !targetFile.isNullOrBlank() -> targetFile
+            active -> tunnels.firstOrNull()?.get("file")
+            else -> null
+        }
+
+        val currentState = VpnStateRepository.vpnState.value
+        val fromTunnel = currentState.tunnelName ?: "直连"
+        val toTunnel = if (active) {
+            resolvedFile?.let { file ->
+                tunnels.firstOrNull { it["file"] == file }?.get("name") ?: file
+            } ?: "直连"
+        } else "直连"
+
+        logEvent(
+            EventType.MANUAL,
+            fromTunnel,
+            toTunnel
+        )
+
+        if (active) {
+            resolvedFile ?: return
+            val startIntent = Intent(appContext, SmartAgent::class.java).apply {
+                action = SmartAgent.ACTION_START_TUNNEL
+                putExtra(SmartAgent.EXTRA_TUNNEL_FILE, resolvedFile)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appContext.startForegroundService(startIntent)
+            } else {
+                appContext.startService(startIntent)
+            }
+        } else {
+            val stopIntent = Intent(appContext, SmartAgent::class.java).apply {
+                action = SmartAgent.ACTION_STOP_TUNNEL
+            }
+            appContext.startService(stopIntent)
+        }
+    }
+
     private fun maybeRestartVpnForAppRule(newConfig: AppRuleConfig) {
         val vpnState = VpnStateRepository.vpnState.value
         if (!vpnState.isRunning) {
