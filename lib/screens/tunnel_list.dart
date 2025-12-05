@@ -46,8 +46,8 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
     super.initState();
     _fabController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 400),
-      reverseDuration: const Duration(milliseconds: 250),
+      duration: const Duration(milliseconds: 200),
+      reverseDuration: const Duration(milliseconds: 200),
     );
     _expandAnimation = CurvedAnimation(
       parent: _fabController,
