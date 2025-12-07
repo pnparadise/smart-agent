@@ -60,44 +60,67 @@ object SmartRuleManager {
         synchronized(this) {
             if (initialized) return
             initialized = true
+            this.context = context.applicationContext
+            SmartConfigRepository.init(context)
         }
-        this.context = context.applicationContext
-        SmartConfigRepository.init(context)
 
         scope.launch {
             SmartConfigRepository.agentRuleConfig.collect { config ->
-                val previouslyEnabled = lastEnabled
-                lastEnabled = config.enabled
-
-                if (config.enabled) {
-                    if (previouslyEnabled == false || previouslyEnabled == null) {
-                        startMonitoring()
-                        // 功能开启，视为新环境，清空状态
-                        resetIgnoredTunnels()
-                        lastEvaluatedState = null
-                        enqueueEvaluation(SmartConfigRepository.EventType.APP_START)
-                    }
-                } else {
-                    stopMonitoring()
-                    resetIgnoredTunnels()
-                    lastEvaluatedState = null
-                }
+                onAgentRuleUpdated(null, config)
             }
         }
     }
 
     /**
-     * 外部配置变更（规则/分流）触发
+     * Agent 规则配置变更触发
      */
-    fun onConfigUpdated(eventType: SmartConfigRepository.EventType) {
-        // APP_START 已由 config 流的 enable 切换处理，避免重复触发
-        if (eventType == SmartConfigRepository.EventType.APP_START) return
-        if (SmartConfigRepository.agentRuleConfig.value.enabled) {
+    fun onAgentRuleUpdated(eventType: SmartConfigRepository.EventType?, config: AgentRuleConfig = SmartConfigRepository.agentRuleConfig.value) {
+        val previouslyEnabled = lastEnabled
+        lastEnabled = config.enabled
+
+        if (config.enabled) {
+            if (previouslyEnabled == false || previouslyEnabled == null || eventType == SmartConfigRepository.EventType.APP_START) {
+                startMonitoring()
+                resetIgnoredTunnels()
+                lastEvaluatedState = null
+                enqueueEvaluation(SmartConfigRepository.EventType.APP_START)
+                return
+            }
             // 配置变了，之前的失败记录可能不再适用，重置
             resetIgnoredTunnels()
             // 强制触发评估（配置变更属于逻辑变更，不依赖网络状态变化）
-            enqueueEvaluation(eventType)
+            if (eventType != null) {
+                enqueueEvaluation(eventType)
+            }
+        } else {
+            stopMonitoring()
+            resetIgnoredTunnels()
+            lastEvaluatedState = null
         }
+    }
+
+    /**
+     * 应用分流配置变更回调
+     */
+    fun onAppRuleUpdated(newConfig: AppRuleConfig) {
+        val vpnState = VpnStateRepository.vpnState.value
+        if (!vpnState.isRunning) return
+        val expectedVersion = if (newConfig.enabled) newConfig.version else null
+        val appliedVersion = vpnState.appRuleVersion
+        val versionChanged = appliedVersion != expectedVersion
+        if (!versionChanged) return
+
+        val tunnelFile = vpnState.tunnelFile ?: return
+        val tunnelName = vpnState.tunnelName ?: "Unknown"
+
+        SmartConfigRepository.logEvent(
+            SmartConfigRepository.EventType.APP_RULE_CHANGED,
+            tunnelName,
+            tunnelName,
+            descPrefix = "重启隧道"
+        )
+
+        startTunnelService(tunnelFile)
     }
 
     /**
@@ -115,7 +138,7 @@ object SmartRuleManager {
     /**
      * 手动切换
      */
-    fun triggerManualSwitch(targetFile: String?, active: Boolean) {
+    fun toggleManualTunnel(targetFile: String?, active: Boolean) {
         scope.launch {
             // 手动干预属于强制行为，清空之前的自动规则忽略列表
             resetIgnoredTunnels()

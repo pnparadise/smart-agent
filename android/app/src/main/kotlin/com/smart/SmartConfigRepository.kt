@@ -28,9 +28,9 @@ object SmartConfigRepository {
         runCatching { db.saveAppRuleConfig(_appRuleConfig.value, json) }.onFailure { it.printStackTrace() }
     }
 
-    private fun notifyRuleChange(eventType: EventType? = EventType.RULE_UPDATED) {
+    private fun notifyRuleChange(eventType: EventType? = EventType.RULE_UPDATED, config: AgentRuleConfig = _agentRuleConfig.value) {
         saveAgentConfig()
-        if (eventType != null) SmartRuleManager.onConfigUpdated(eventType)
+        if (eventType != null) SmartRuleManager.onAgentRuleUpdated(eventType, config)
     }
 
     fun init(context: Context) {
@@ -129,7 +129,7 @@ object SmartConfigRepository {
         val current = _agentRuleConfig.value
         if (current.enabled == enabled) return
         _agentRuleConfig.value = current.copy(enabled = enabled)
-        notifyRuleChange(if (enabled) EventType.APP_START else null)
+        notifyRuleChange(if (enabled) EventType.APP_START else null, _agentRuleConfig.value)
     }
 
     fun updateAgentRuleConfig(config: AgentRuleConfig, triggerEvent: Boolean = true) {
@@ -138,7 +138,7 @@ object SmartConfigRepository {
         _agentRuleConfig.value = config
         if (triggerEvent) {
             val event = if (!previous.enabled && config.enabled) EventType.APP_START else EventType.RULE_UPDATED
-            notifyRuleChange(event)
+            notifyRuleChange(event, _agentRuleConfig.value)
         } else {
             saveAgentConfig()
         }
@@ -152,7 +152,7 @@ object SmartConfigRepository {
         } else config.copy(version = previous.version)
         _appRuleConfig.value = bumped
         saveAppRuleConfig()
-        maybeRestartVpnForAppRule(bumped)
+        SmartRuleManager.onAppRuleUpdated(bumped)
     }
 
     fun addRule(type: RuleType, value: String?, tunnelFile: String, tunnelName: String?) {
@@ -196,7 +196,7 @@ object SmartConfigRepository {
         val newConfig = previous.copy(enabled = enabled)
         _appRuleConfig.value = newConfig
         saveAppRuleConfig()
-        maybeRestartVpnForAppRule(newConfig)
+        SmartRuleManager.onAppRuleUpdated(newConfig)
     }
 
     fun updateSelectedApps(packages: List<String>) {
@@ -206,70 +206,7 @@ object SmartConfigRepository {
         val newConfig = previous.copy(selectedApps = packages, version = newVersion)
         _appRuleConfig.value = newConfig
         saveAppRuleConfig()
-        maybeRestartVpnForAppRule(newConfig)
-    }
-
-    fun toggleManualTunnel(targetFile: String?, active: Boolean) {
-        val tunnels = getTunnels()
-        val resolvedFile = when {
-            active && !targetFile.isNullOrBlank() -> targetFile
-            active -> tunnels.firstOrNull()?.get("file")
-            else -> null
-        }
-
-        val currentState = VpnStateRepository.vpnState.value
-        val fromTunnel = currentState.tunnelName ?: "直连"
-        val toTunnel = if (active) {
-            resolvedFile?.let { file ->
-                tunnels.firstOrNull { it["file"] == file }?.get("name") ?: file
-            } ?: "直连"
-        } else "直连"
-
-        SmartRuleManager.triggerManualSwitch(resolvedFile, active)
-    }
-
-    private fun maybeRestartVpnForAppRule(newConfig: AppRuleConfig) {
-        val vpnState = VpnStateRepository.vpnState.value
-        if (!vpnState.isRunning) {
-            return
-        }
-        val appliedVersion = vpnState.appRuleVersion
-        val expectedVersion = if (newConfig.enabled) newConfig.version else null
-        val versionChanged = appliedVersion != expectedVersion
-        
-
-        if (!versionChanged) return
-        val tunnelFile = vpnState.tunnelFile ?: return
-        val tunnelName = vpnState.tunnelName ?: "Unknown"
-
-        runCatching {
-
-            // Log split change before restart.
-            logEvent(
-                EventType.APP_RULE_CHANGED,
-                tunnelName,
-                tunnelName,
-                descPrefix = "重启隧道"
-            )
-
-            // val stopIntent = Intent(appContext, SmartAgent::class.java).apply {
-            //     action = SmartAgent.ACTION_STOP_TUNNEL
-            // }
-            // appContext.startService(stopIntent)
-
-            val startIntent = Intent(appContext, SmartAgent::class.java).apply {
-                action = SmartAgent.ACTION_START_TUNNEL
-                putExtra(SmartAgent.EXTRA_TUNNEL_FILE, tunnelFile)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appContext.startForegroundService(startIntent)
-            } else {
-                appContext.startService(startIntent)
-            }
-        }.onFailure {
-            android.util.Log.e("SmartConfigRepo", "maybeRestart failed", it)
-            it.printStackTrace()
-        }
+        SmartRuleManager.onAppRuleUpdated(newConfig)
     }
 
     fun logEvent(

@@ -63,7 +63,7 @@ class SmartTileService : TileService() {
             lastTunnelFile ?: currentState.tunnelFile ?: tunnels.firstOrNull()?.get("file")
         } else currentState.tunnelFile ?: lastTunnelFile
 
-        SmartRuleManager.triggerManualSwitch(targetFile, desiredActive)
+        SmartRuleManager.toggleManualTunnel(targetFile, desiredActive)
         if (desiredActive && !targetFile.isNullOrBlank()) {
             lastTunnelFile = targetFile
         }

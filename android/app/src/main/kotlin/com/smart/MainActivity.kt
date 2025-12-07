@@ -65,10 +65,10 @@ class MainActivity : FlutterActivity() {
                     if (prepareIntent != null) {
                         startActivityForResult(prepareIntent, VPN_REQUEST_CODE)
                     } else {
-                        SmartRuleManager.triggerManualSwitch(file, true)
+                        SmartRuleManager.toggleManualTunnel(file, true)
                     }
                 } else {
-                    SmartRuleManager.triggerManualSwitch(file, false)
+                    SmartRuleManager.toggleManualTunnel(file, false)
                 }
             }
         )
@@ -112,7 +112,7 @@ class MainActivity : FlutterActivity() {
                 val file = pendingTunnelFile
                 pendingTunnelFile = null
                 if (file != null) {
-                    SmartRuleManager.triggerManualSwitch(file, true)
+                    SmartRuleManager.toggleManualTunnel(file, true)
                 } else {
                     startService(Intent(this, SmartAgent::class.java))
                 }
