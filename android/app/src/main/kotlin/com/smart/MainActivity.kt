@@ -1,10 +1,15 @@
 package com.smart
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -60,10 +65,10 @@ class MainActivity : FlutterActivity() {
                     if (prepareIntent != null) {
                         startActivityForResult(prepareIntent, VPN_REQUEST_CODE)
                     } else {
-                        SmartConfigRepository.toggleManualTunnel(file, true)
+                        SmartRuleManager.triggerManualSwitch(file, true)
                     }
                 } else {
-                    SmartConfigRepository.toggleManualTunnel(file, false)
+                    SmartRuleManager.triggerManualSwitch(file, false)
                 }
             }
         )
@@ -72,6 +77,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestPostNotificationPermissionIfNeeded()
 
         // Observe VPN state changes and send them to Flutter
         lifecycleScope.launch {
@@ -106,7 +112,7 @@ class MainActivity : FlutterActivity() {
                 val file = pendingTunnelFile
                 pendingTunnelFile = null
                 if (file != null) {
-                    SmartConfigRepository.toggleManualTunnel(file, true)
+                    SmartRuleManager.triggerManualSwitch(file, true)
                 } else {
                     startService(Intent(this, SmartAgent::class.java))
                 }
@@ -158,6 +164,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val VPN_REQUEST_CODE = 101
+        private const val NOTIFICATION_REQUEST_CODE = 201
     }
 
     private fun importTunnelConfig() {
@@ -196,5 +203,17 @@ class MainActivity : FlutterActivity() {
             }
         }
         return null
+    }
+
+    private fun requestPostNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            NOTIFICATION_REQUEST_CODE
+        )
     }
 }

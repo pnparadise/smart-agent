@@ -1,18 +1,24 @@
 package com.smart
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.service.quicksettings.TileService
-
+import androidx.core.app.NotificationCompat
+import com.wireguard.android.backend.BackendException
 import com.wireguard.android.backend.GoBackend
 import com.wireguard.android.backend.Statistics
 import com.wireguard.android.backend.Tunnel
+import com.wireguard.config.BadConfigException
 import com.wireguard.config.Config
 import com.wireguard.config.Interface
-import com.wireguard.config.BadConfigException
-import com.wireguard.android.backend.BackendException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,6 +33,9 @@ class SmartAgent : VpnService() {
     private val coroutineScope = CoroutineScope(Dispatchers.Main)
     private var statsJob: Job? = null
     private var activeAppRuleVersion: Int? = null
+    private val notificationId = 1001
+    private val notificationChannelId = "smart_vpn_channel"
+    private val notificationChannelName = "VPN 服务"
 
     companion object {
         const val ACTION_START_TUNNEL = "com.smart.action.START_TUNNEL"
@@ -81,7 +90,37 @@ class SmartAgent : VpnService() {
         }
     }
 
-    private fun createNotification(contentText: String): android.app.Notification? = null
+    private fun createNotification(contentText: String): Notification {
+        ensureNotificationChannel()
+        val intent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, notificationChannelId)
+            .setContentTitle("易连运行中")
+            .setContentText(contentText)
+            .setSmallIcon(R.drawable.ic_qs_tile)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .build()
+    }
+
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channel = NotificationChannel(
+                notificationChannelId,
+                notificationChannelName,
+                NotificationManager.IMPORTANCE_LOW
+            )
+            manager.createNotificationChannel(channel)
+        }
+    }
 
     private fun startVpn(fileName: String) {
         val previousState = VpnStateRepository.vpnState.value
@@ -97,6 +136,16 @@ class SmartAgent : VpnService() {
 
         val baseName = fileName
         var targetTunnelName = fileName.substringBeforeLast(".", fileName)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                notificationId,
+                createNotification("正在连接 $targetTunnelName"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+        } else {
+            startForeground(notificationId, createNotification("正在连接 $targetTunnelName"))
+        }
 
         coroutineScope.launch(Dispatchers.IO) {
             try {
@@ -164,19 +213,32 @@ class SmartAgent : VpnService() {
                 }
                 backend.setState(newTunnel, Tunnel.State.UP, config)
                 activeTunnel = newTunnel
+                updateNotification("已连接 $targetTunnelName")
                 startStatsPolling(targetTunnelName, fileName)
             } catch (e: Exception) {
                 activeTunnel = null
                 activeAppRuleVersion = null
                 val errorMsg = extractErrorMessage(e)
+
+
+                // 1. 记录具体的错误日志
                 SmartConfigRepository.logEvent(
                     SmartConfigRepository.EventType.TUNNEL_ERROR,
                     targetTunnelName,
                     "直连",
-                    error = errorMsg
+                    error = errorMsg,
+                    descPrefix = "启动失败"
                 )
+
+                // 2. 停止当前 VPN 状态 (清理通知栏等)
                 stopVpn()
+
+                // 3. 提示用户
                 showToast("启动隧道失败: $errorMsg")
+
+                // 4. [关键] 通知 RuleManager 进行 Fallback (尝试下一条规则)
+                // 这将触发 evaluateRules(TUNNEL_ERROR)，从而跳过当前规则，寻找备用隧道或直连
+                SmartRuleManager.onTunnelConnectionFailed(fileName)
             }
         }
     }
@@ -201,10 +263,14 @@ class SmartAgent : VpnService() {
                     appRuleVersion = null
                 )
             )
+            stopForeground(true)
         }
     }
 
-    private fun updateNotification(contentText: String) {}
+    private fun updateNotification(contentText: String) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(notificationId, createNotification(contentText))
+    }
 
     private fun pushStats(tunnelName: String, tunnelFile: String) {
         val stats = getStats()

@@ -63,7 +63,7 @@ class SmartTileService : TileService() {
             lastTunnelFile ?: currentState.tunnelFile ?: tunnels.firstOrNull()?.get("file")
         } else currentState.tunnelFile ?: lastTunnelFile
 
-        SmartConfigRepository.toggleManualTunnel(targetFile, desiredActive)
+        SmartRuleManager.triggerManualSwitch(targetFile, desiredActive)
         if (desiredActive && !targetFile.isNullOrBlank()) {
             lastTunnelFile = targetFile
         }
@@ -81,9 +81,8 @@ class SmartTileService : TileService() {
         if (!currentState.tunnelFile.isNullOrBlank()) {
             lastTunnelFile = currentState.tunnelFile
         }
-        val activeConfig = SmartConfigRepository.agentRuleConfig.value.enabled
-        val active = activeConfig && currentState.isRunning
-        val label = if (active) currentState.tunnelName ?: "SmartAgent" else "SmartAgent"
+        val active = currentState.isRunning
+        val label = if (active) currentState.tunnelName ?: "易连" else "易连"
         val subtitle = label
         tile.state = if (active) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         applyTileText(tile, label, subtitle)

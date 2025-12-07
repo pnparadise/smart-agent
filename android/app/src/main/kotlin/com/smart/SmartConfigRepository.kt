@@ -225,29 +225,7 @@ object SmartConfigRepository {
             } ?: "直连"
         } else "直连"
 
-        logEvent(
-            EventType.MANUAL,
-            fromTunnel,
-            toTunnel
-        )
-
-        if (active) {
-            resolvedFile ?: return
-            val startIntent = Intent(appContext, SmartAgent::class.java).apply {
-                action = SmartAgent.ACTION_START_TUNNEL
-                putExtra(SmartAgent.EXTRA_TUNNEL_FILE, resolvedFile)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appContext.startForegroundService(startIntent)
-            } else {
-                appContext.startService(startIntent)
-            }
-        } else {
-            val stopIntent = Intent(appContext, SmartAgent::class.java).apply {
-                action = SmartAgent.ACTION_STOP_TUNNEL
-            }
-            appContext.startService(stopIntent)
-        }
+        SmartRuleManager.triggerManualSwitch(resolvedFile, active)
     }
 
     private fun maybeRestartVpnForAppRule(newConfig: AppRuleConfig) {
@@ -327,13 +305,20 @@ object SmartConfigRepository {
     enum class EventType(val label: String) {
         MANUAL("手动切换"),
         APP_START("SmartAgent启动"),
+
+        // Log Labels for Network State
         WIFI_CONNECTED("Wifi已连接"),
         WIFI_DISCONNECTED("Wifi断开"),
         MOBILE_CONNECTED("移动数据已连接"),
         MOBILE_DISCONNECTED("移动数据已断开"),
+
+        // Event Sources
+        NETWORK_AVAILABLE("网络可用"),
+        NETWORK_LOST("网络断开"),
+
         RULE_UPDATED("规则更新"),
+        APP_RULE_CHANGED("分流变更"),
         TUNNEL_ERROR("连接失败"),
-        NETWORK_CHANGED("网络可用"),
-        APP_RULE_CHANGED("分流变更")
+        FALLBACK("连接回退")
     }
 }
