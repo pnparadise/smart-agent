@@ -1,0 +1,23 @@
+name: Update beta tag on main push
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update-latest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update beta tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -f 1.0-beta
+          git push origin 1.0-beta -f
