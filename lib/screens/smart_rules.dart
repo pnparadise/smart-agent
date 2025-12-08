@@ -20,11 +20,19 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   List<String> _selectedApps = [];
   List<AgentRule> _rules = [];
   List<LocalTunnel> _tunnels = [];
+
+  // 编辑状态
   RuleType _formType = RuleType.wifiSsid;
   final TextEditingController _ssidController = TextEditingController();
   String? _formTunnel;
   String? _editingRuleId;
+  bool _isAddingNew = false;
+
   bool _loading = true;
+
+  // 滚动控制相关
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _tempItemKey = GlobalKey();
 
   @override
   void initState() {
@@ -35,8 +43,11 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   @override
   void dispose() {
     _ssidController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
+
+  // --- Helpers ---
 
   Widget _buildToggleSwitch({
     required bool value,
@@ -55,7 +66,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
         if (states.contains(MaterialState.selected)) {
           return const Icon(Icons.check, size: 12, color: AppTheme.vultrBlue);
         }
-        return null; // No icon for inactive state
+        return null;
       }),
     );
   }
@@ -90,31 +101,38 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
     );
   }
 
+  // --- Logic ---
+
   Future<void> _loadConfig() async {
     try {
       final config = await SmartAgentApi.getSmartConfig();
       final tunnels = await SmartAgentApi.getTunnels();
-      setState(() {
-        _enabled = config['enabled'] as bool;
-        _appRuleEnabled = config['appRuleEnabled'] as bool? ?? false;
-        _selectedApps = (config['selectedApps'] as List?)?.cast<String>() ?? [];
-        _rules = (config['rules'] as List)
-            .map((e) => AgentRule.fromMap(Map<String, dynamic>.from(e)))
-            .toList();
-        _tunnels = tunnels;
-        _formTunnel = _formTunnel ?? (_tunnels.isNotEmpty ? _tunnels.first.file : null);
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _enabled = config['enabled'] as bool;
+          _appRuleEnabled = config['appRuleEnabled'] as bool? ?? false;
+          _selectedApps = (config['selectedApps'] as List?)?.cast<String>() ?? [];
+          _rules = (config['rules'] as List)
+              .map((e) => AgentRule.fromMap(Map<String, dynamic>.from(e)))
+              .toList();
+          _tunnels = tunnels;
+          _loading = false;
+        });
+      }
     } catch (e) {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<void> _saveAgentRuleConfig() async {
+    final validRules = _rules.where((r) => r.id != 'TEMP_NEW_RULE').toList();
     await SmartAgentApi.setAgentRuleConfig(
       enabled: _enabled,
-      rules: _rules,
+      rules: validRules,
     );
+    if (mounted && !_isAddingNew) {
+      setState(() => _rules = validRules);
+    }
   }
 
   Future<void> _saveAppRuleConfig() async {
@@ -125,24 +143,94 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   }
 
   void _startNewRule() {
+    if (_editingRuleId != null) {
+      if (_editingRuleId == 'TEMP_NEW_RULE') {
+        _cancelEdit();
+        return;
+      }
+      setState(() {
+        _editingRuleId = null;
+        _ssidController.clear();
+      });
+    }
+
+    final newRule = AgentRule(
+      id: 'TEMP_NEW_RULE',
+      type: RuleType.wifiSsid,
+      value: '',
+      tunnelFile: '',
+      tunnelName: '直连',
+      enabled: true,
+    );
+
     setState(() {
-      _editingRuleId = null;
-      _formType = RuleType.wifiSsid;
-      _ssidController.text = '';
-      _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
+      _isAddingNew = true;
+      _rules.add(newRule);
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        setState(() {
+          _editingRuleId = newRule.id;
+          _formType = RuleType.wifiSsid;
+          _ssidController.text = '';
+          _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
+        });
+
+        // 核心修改逻辑：
+        // 1. 先让 AnimatedSize 跑完动画（UI中设定是300ms）。
+        // 2. 设置 350ms 的延时，确保高度已经完全撑开。
+        // 3. alignment: 1.0 强制将卡片的底部对齐到屏幕的底部。
+        Future.delayed(const Duration(milliseconds: 200), () {
+          if (_scrollController.hasClients) {
+            _scrollController.animateTo(
+              _scrollController.position.maxScrollExtent, // 滚动到底部，自然露出底部的 60px 留白
+              duration: const Duration(milliseconds: 400),
+              curve: Curves.easeOutCubic,
+            );
+          }
+        });
+      }
     });
   }
 
   void _startEdit(AgentRule rule) {
+    if (_editingRuleId != null && _editingRuleId != rule.id) {
+      _cancelEdit();
+    }
+
     setState(() {
       _editingRuleId = rule.id;
       _formType = rule.type;
       _ssidController.text = rule.value ?? '';
+
       final file = rule.tunnelFile;
       final candidate = file.isEmpty ? null : file;
       final exists = candidate != null && _tunnels.any((t) => t.file == candidate);
       _formTunnel = exists ? candidate : null;
     });
+  }
+
+  void _cancelEdit() {
+    if (_isAddingNew && _editingRuleId == 'TEMP_NEW_RULE') {
+      setState(() {
+        _editingRuleId = null;
+      });
+      Future.delayed(const Duration(milliseconds: 300), () {
+        if (mounted && _isAddingNew) {
+          setState(() {
+            _rules.removeWhere((r) => r.id == 'TEMP_NEW_RULE');
+            _isAddingNew = false;
+          });
+        }
+      });
+    } else {
+      setState(() {
+        _editingRuleId = null;
+        _isAddingNew = false;
+        _ssidController.clear();
+      });
+    }
   }
 
   void _submitRule() {
@@ -158,87 +246,85 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
     final tunnelName = _formTunnel == null
         ? '直连'
         : _tunnels.firstWhere(
-            (t) => t.file == _formTunnel,
-            orElse: () => LocalTunnel(name: _formTunnel ?? '', file: _formTunnel ?? ''),
-          ).name;
+          (t) => t.file == _formTunnel,
+      orElse: () => LocalTunnel(name: _formTunnel ?? '', file: _formTunnel ?? ''),
+    ).name;
+
+    final finalId = (_isAddingNew || _editingRuleId == 'TEMP_NEW_RULE')
+        ? DateTime.now().millisecondsSinceEpoch.toString()
+        : _editingRuleId!;
 
     final rule = AgentRule(
-      id: _editingRuleId ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      id: finalId,
       type: _formType,
       value: _formType == RuleType.wifiSsid ? _ssidController.text.trim() : null,
       tunnelFile: tunnelFile,
       tunnelName: tunnelName,
       enabled: true,
     );
+
     setState(() {
-      final idx = _rules.indexWhere((r) => r.id == rule.id);
+      final idx = _rules.indexWhere((r) => r.id == _editingRuleId);
       if (idx != -1) {
         _rules[idx] = rule;
       } else {
         _rules.add(rule);
       }
       _editingRuleId = null;
+      _isAddingNew = false;
       _ssidController.clear();
-      _formType = RuleType.wifiSsid;
-      _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
     });
     _saveAgentRuleConfig();
   }
+
+  // --- UI ---
 
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
 
     return Scaffold(
+      backgroundColor: const Color(0xFFF2F4F7),
       body: CustomScrollView(
+        controller: _scrollController,
         slivers: [
           SliverToBoxAdapter(child: _buildAppRuleCard()),
           SliverToBoxAdapter(child: _buildHeader()),
+
           if (_enabled)
-            SliverToBoxAdapter(
-              child: ReorderableListView.builder(
-                physics: const NeverScrollableScrollPhysics(),
-                shrinkWrap: true,
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                itemCount: _rules.length,
-                buildDefaultDragHandles: false,
-                proxyDecorator: (child, index, animation) => child,
-                onReorder: (oldIndex, newIndex) {
-                  if (oldIndex < newIndex) newIndex -= 1;
-                  setState(() {
-                    final item = _rules.removeAt(oldIndex);
-                    _rules.insert(newIndex, item);
-                  });
-                  _saveAgentRuleConfig();
-                },
-                itemBuilder: (context, index) {
-                  final rule = _rules[index];
-                  return _buildRuleItem(rule, index);
-                },
-              ),
+            SliverReorderableList(
+              onReorder: (oldIndex, newIndex) {
+                if (_editingRuleId != null) return;
+
+                if (oldIndex < newIndex) newIndex -= 1;
+                setState(() {
+                  final item = _rules.removeAt(oldIndex);
+                  _rules.insert(newIndex, item);
+                });
+                _saveAgentRuleConfig();
+              },
+              itemCount: _rules.length,
+              itemBuilder: (context, index) {
+                final rule = _rules[index];
+                return _buildRuleItem(rule, index);
+              },
             ),
-          if (_enabled)
+
+          if (_enabled && !_isAddingNew)
             SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 80),
-                child: Column(
-                  children: [
-                    _buildInlineEditor(),
-                    const SizedBox(height: 64),
-                  ],
-                ),
-              ),
+              child: _buildAddButton(),
             ),
+
+          const SliverToBoxAdapter(child: SizedBox(height: 60)),
         ],
       ),
-      floatingActionButton: null,
     );
   }
 
   Widget _buildAppRuleCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 8), // Top: 16, Bottom: 8
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -277,7 +363,6 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
             const SizedBox(height: 12),
             ElevatedButton.icon(
               onPressed: () async {
-                // Navigate immediately; AppSelectPage shows its own loader.
                 final result = await Navigator.of(context).push<List<String>>(
                   MaterialPageRoute(
                     builder: (_) => AppSelectPage(selected: _selectedApps),
@@ -291,7 +376,9 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.white,
                 foregroundColor: AppTheme.textPrimary,
+                elevation: 0,
                 side: const BorderSide(color: AppTheme.divider),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
               icon: const Icon(Icons.playlist_add_check_outlined, color: AppTheme.vultrBlue),
               label: Text(
@@ -357,236 +444,298 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   }
 
   Widget _buildRuleItem(AgentRule rule, int index) {
+    final isEditing = rule.id == _editingRuleId;
+    final isTemp = rule.id == 'TEMP_NEW_RULE';
+    final double verticalPadding = isTemp ? 12 : 4;
+
+    Widget dragHandleWidget = Container(
+      color: Colors.transparent,
+      padding: const EdgeInsets.fromLTRB(12, 16, 0, 16),
+      child: _buildDragHandle(),
+    );
+
     return Container(
       key: ValueKey(rule.id),
-      margin: const EdgeInsets.fromLTRB(0, 0, 0, 8),
-      child: Material(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        child: ListTile(
-          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      decoration: BoxDecoration(
+        boxShadow: isEditing ? AppTheme.cardShadow : null,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Material(
+          // 如果是新增的临时规则，绑定 GlobalKey，确保滚动定位准确
+          key: isTemp ? _tempItemKey : null,
+          color: Colors.white,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: verticalPadding),
+                onTap: () {
+                  if (isEditing) {
+                    _cancelEdit();
+                  } else {
+                    _startEdit(rule);
+                  }
+                },
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AppTheme.background,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    isTemp
+                        ? Icons.playlist_add
+                        : (rule.type == RuleType.wifiSsid ? Icons.wifi : Icons.public),
+                    color: isEditing ? AppTheme.vultrBlue : AppTheme.textSecondary,
+                    size: 24,
+                  ),
+                ),
+                title: Text(
+                  isTemp
+                      ? '新增隧道匹配规则'
+                      : (rule.type == RuleType.wifiSsid ? (rule.value?.isEmpty ?? true ? '配置 WiFi' : 'WiFi: ${rule.value}') : rule.type.label),
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                    color: AppTheme.textPrimary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: isTemp
+                    ? null
+                    : Text(
+                  'Target: ${rule.tunnelName}',
+                  style: GoogleFonts.inter(
+                    fontSize: 13,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+                trailing: isTemp
+                    ? null
+                    : (isEditing
+                    ? null
+                    : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit_outlined, size: 20),
+                      color: AppTheme.textSecondary,
+                      onPressed: () => _startEdit(rule),
+                    ),
+                    _editingRuleId != null
+                        ? Opacity(opacity: 0.0, child: dragHandleWidget)
+                        : ReorderableDragStartListener(
+                      index: index,
+                      child: dragHandleWidget,
+                    ),
+                  ],
+                )),
+                onLongPress: (isEditing || isTemp) ? null : () async {
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      backgroundColor: Colors.white,
+                      title: const Text('删除规则'),
+                      content: const Text('确定删除该规则吗？'),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+                        TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
+                      ],
+                    ),
+                  );
+                  if (confirm == true) {
+                    setState(() {
+                      _rules.removeWhere((r) => r.id == rule.id);
+                    });
+                    _saveAgentRuleConfig();
+                  }
+                },
+              ),
+
+              // 展开编辑区域
+              AnimatedSize(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOutCubic,
+                alignment: Alignment.topCenter,
+                child: isEditing
+                    ? Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Divider(height: 1, thickness: 1, color: Color(0xFFF2F4F7)),
+                      const SizedBox(height: 16),
+
+                      Row(
+                        children: [
+                          Expanded(
+                            child: DropdownButtonFormField<RuleType>(
+                              value: _formType,
+                              isExpanded: true,
+                              isDense: true,
+                              decoration: InputDecoration(
+                                labelText: '条件类型',
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                              ),
+                              items: RuleType.values.map((t) {
+                                return DropdownMenuItem(value: t, child: Text(t.label));
+                              }).toList(),
+                              onChanged: (val) {
+                                if (val != null) setState(() => _formType = val);
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: DropdownButtonFormField<String?>(
+                              value: _tunnels.any((t) => t.file == _formTunnel) ? _formTunnel : null,
+                              isExpanded: true,
+                              isDense: true,
+                              decoration: InputDecoration(
+                                labelText: '目标隧道',
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                              ),
+                              items: [
+                                const DropdownMenuItem<String?>(value: null, child: Text('直连')),
+                                ..._tunnels.map((t) => DropdownMenuItem<String?>(value: t.file, child: Text(t.name))),
+                              ],
+                              onChanged: (val) {
+                                setState(() => _formTunnel = val);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      if (_formType == RuleType.wifiSsid) ...[
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _ssidController,
+                                decoration: InputDecoration(
+                                  labelText: 'WiFi SSID',
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              style: IconButton.styleFrom(
+                                backgroundColor: AppTheme.background,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                              icon: const Icon(Icons.wifi_find, color: AppTheme.textSecondary),
+                              onPressed: () async {
+                                final granted = await SmartAgentApi.requestLocationPermission();
+                                if (!granted) {
+                                  if (!mounted) return;
+                                  Notifier.show(context, '请先授予位置信息权限并开启定位');
+                                  return;
+                                }
+                                final ssids = await SmartAgentApi.getSavedSsids();
+                                if (!mounted) return;
+                                if (ssids.isEmpty) {
+                                  Notifier.show(context, '未获取到已保存的WiFi');
+                                  return;
+                                }
+                                final selected = await showModalBottomSheet<String>(
+                                  context: context,
+                                  backgroundColor: Colors.white,
+                                  builder: (ctx) {
+                                    return ListView.separated(
+                                      padding: const EdgeInsets.all(16),
+                                      itemBuilder: (_, i) => ListTile(
+                                        title: Text(ssids[i], style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
+                                        onTap: () => Navigator.pop(ctx, ssids[i]),
+                                      ),
+                                      separatorBuilder: (_, __) => const Divider(height: 1),
+                                      itemCount: ssids.length,
+                                    );
+                                  },
+                                );
+                                if (selected != null) {
+                                  _ssidController.text = selected;
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      ],
+
+                      const SizedBox(height: 16),
+
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: _cancelEdit,
+                            style: TextButton.styleFrom(
+                              foregroundColor: AppTheme.textSecondary,
+                            ),
+                            child: const Text('取消'),
+                          ),
+                          const SizedBox(width: 8),
+                          ElevatedButton(
+                            onPressed: _submitRule,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppTheme.vultrBlue,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                            ),
+                            child: const Text('保存'),
+                          ),
+                        ],
+                      )
+                    ],
+                  ),
+                )
+                    : const SizedBox(width: double.infinity),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAddButton() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Material(
+          color: Colors.white,
+          child: ListTile(
+            onTap: _startNewRule,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             leading: Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
                 color: AppTheme.background,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Icon(
-                rule.type == RuleType.wifiSsid ? Icons.wifi : Icons.public,
-                color: AppTheme.textSecondary,
-                size: 28,
-              ),
-          ),
-          title: Text(
-            rule.type == RuleType.wifiSsid ? 'WiFi: ${rule.value}' : rule.type.label,
-            style: GoogleFonts.inter(
-              fontWeight: FontWeight.w600,
-              fontSize: 15,
-              color: AppTheme.textPrimary,
+              child: const Icon(Icons.playlist_add, color: AppTheme.textSecondary, size: 24),
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          subtitle: Text(
-            'Target: ${rule.tunnelName}',
-            style: GoogleFonts.inter(
-              fontSize: 13,
-              color: AppTheme.textSecondary,
+            title: Text(
+              '新增隧道匹配规则',
+              style: GoogleFonts.inter(
+                fontWeight: FontWeight.w600,
+                fontSize: 15,
+                color: AppTheme.textPrimary,
+              ),
             ),
           ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.edit_outlined, size: 20),
-                color: AppTheme.textSecondary,
-                onPressed: () => _startEdit(rule),
-              ),
-              ReorderableDragStartListener(
-                index: index,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (_) {}, // Prevent parent tap/scroll during drag start
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: _buildDragHandle(),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          onLongPress: () async {
-            final confirm = await showDialog<bool>(
-              context: context,
-              barrierColor: Colors.black54,
-              builder: (ctx) => AlertDialog(
-                backgroundColor: Colors.white,
-                title: const Text('删除规则'),
-                content: const Text('确定删除该规则吗？'),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-                  TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
-                ],
-              ),
-            );
-            if (confirm == true) {
-              setState(() {
-                _rules.removeWhere((r) => r.id == rule.id);
-              });
-              _saveAgentRuleConfig();
-            }
-          },
         ),
-      ),
-    );
-  }
-
-  Widget _buildInlineEditor() {
-    return Container(
-      key: const ValueKey('inline-editor'),
-      margin: const EdgeInsets.only(top: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: AppTheme.cardShadow,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                _editingRuleId == null ? '新增规则' : '编辑规则',
-                style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700),
-              ),
-              TextButton(
-                onPressed: _editingRuleId != null ? _startNewRule : null,
-                child: Text(
-                  _editingRuleId != null ? '新增' : '新增',
-                  style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: AppTheme.textSecondary),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: DropdownButtonFormField<RuleType>(
-                  value: _formType,
-                  isExpanded: true,
-                  isDense: true,
-                  decoration: InputDecoration(
-                    labelText: '条件类型',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  ),
-                  items: RuleType.values.map((t) {
-                    return DropdownMenuItem(value: t, child: Text(t.label));
-                  }).toList(),
-                  onChanged: (val) {
-                    if (val != null) setState(() => _formType = val);
-                  },
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: DropdownButtonFormField<String?>(
-                  value: _tunnels.any((t) => t.file == _formTunnel) ? _formTunnel : null,
-                  isExpanded: true,
-                  isDense: true,
-                  decoration: InputDecoration(
-                    labelText: '目标隧道',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  ),
-                  items: [
-                    const DropdownMenuItem<String?>(value: null, child: Text('直连')),
-                    ..._tunnels.map((t) => DropdownMenuItem<String?>(value: t.file, child: Text(t.name))),
-                  ],
-                  onChanged: (val) {
-                    setState(() => _formTunnel = val);
-                  },
-                ),
-              ),
-            ],
-          ),
-          if (_formType == RuleType.wifiSsid) ...[
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _ssidController,
-                    decoration: InputDecoration(
-                      labelText: 'WiFi SSID',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  icon: const Icon(Icons.wifi_find, color: AppTheme.textSecondary),
-                  onPressed: () async {
-                    final granted = await SmartAgentApi.requestLocationPermission();
-                    if (!granted) {
-                      if (!mounted) return;
-                      Notifier.show(context, '请先授予位置信息权限并开启定位');
-                      return;
-                    }
-                    final ssids = await SmartAgentApi.getSavedSsids();
-                    if (!mounted) return;
-                    if (ssids.isEmpty) {
-                      Notifier.show(context, '未获取到已保存的WiFi');
-                      return;
-                    }
-                    final selected = await showModalBottomSheet<String>(
-                      context: context,
-                      backgroundColor: Colors.white,
-                      builder: (ctx) {
-                        return ListView.separated(
-                          padding: const EdgeInsets.all(16),
-                          itemBuilder: (_, i) => ListTile(
-                            title: Text(ssids[i], style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
-                            onTap: () => Navigator.pop(ctx, ssids[i]),
-                          ),
-                          separatorBuilder: (_, __) => const Divider(height: 1),
-                          itemCount: ssids.length,
-                        );
-                      },
-                    );
-                    if (selected != null) {
-                      _ssidController.text = selected;
-                    }
-                  },
-                ),
-              ],
-            ),
-          ],
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: _startNewRule,
-                child: Text('重置', style: GoogleFonts.inter(color: AppTheme.textSecondary)),
-              ),
-              const SizedBox(width: 12),
-              ElevatedButton(
-                onPressed: _submitRule,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.vultrBlue,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-                child: const Text('保存'),
-              ),
-            ],
-          )
-        ],
       ),
     );
   }

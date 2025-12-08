@@ -132,47 +132,38 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
   }
 
   Widget _buildFab() {
+    // 容器高度设为 64 足够了，宽度适当留余量防止点击被裁剪
     return SizedBox(
-      width: 260, // Widen hit area so expanded actions remain tappable
-      height: 56, // Standard FAB height
+      width: 360,
+      height: 64,
       child: Stack(
+        // 关键点1：全局右对齐 + 垂直居中
+        // 这样里面的所有元素默认都会在垂直方向的中间，不用去算 bottom 是多少
         alignment: Alignment.centerRight,
         clipBehavior: Clip.none,
         children: [
-          // Import Tunnel Button
+          // 1. 导入配置 (Import)
           _buildFabOption(
             index: 2,
             icon: Icons.cloud_upload_outlined,
-            label: '导入隧道',
+            label: '导入配置',
             onPressed: () async {
               _toggleFab();
               final success = await SmartAgentApi.importConfig();
-              if (success) {
-                _loadTunnels();
-              }
+              if (success) _loadTunnels();
             },
           ),
-          // New Tunnel Button
+
+          // 2. 新建隧道 (New)
           _buildFabOption(
             index: 1,
-            icon: Icons.edit_note,
-            label: '新增隧道',
+            icon: Icons.add_circle_outline,
+            label: '新建隧道',
             onPressed: () async {
               _toggleFab();
+              // ... 这里保持你的原有逻辑 ...
               final fileName = 'manual_${DateTime.now().millisecondsSinceEpoch}.conf';
-              final template = '''
-[Interface]
-PrivateKey =
-Address = 10.0.0.2/32
-DNS = 1.1.1.1
-
-[Peer]
-PublicKey =
-PresharedKey =
-AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = example.com:51820
-PersistentKeepalive = 25
-''';
+              final template = '''[Interface]\nPrivateKey =\nAddress = 10.0.0.2/32\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey =\nPresharedKey =\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = example.com:51820\nPersistentKeepalive = 25''';
               final saved = await Navigator.of(context).push<bool>(
                 MaterialPageRoute(
                   builder: (_) => TunnelEditPage(
@@ -181,30 +172,39 @@ PersistentKeepalive = 25
                   ),
                 ),
               );
-              if (saved == true) {
-                _loadTunnels();
-              }
+              if (saved == true) _loadTunnels();
             },
           ),
-          // Main Toggle Button
-          FloatingActionButton(
-            heroTag: 'fab_toggle',
-            onPressed: _toggleFab,
-            backgroundColor: Colors.white,
-            elevation: 4,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
-            child: AnimatedBuilder(
-              animation: _fabController,
-              builder: (context, child) {
-                return Transform.rotate(
-                  angle: _fabController.value * 0.75 * 3.14159, // Rotate 135 degrees
-                  child: Icon(
-                    Icons.add,
-                    color: AppTheme.vultrBlue,
-                    size: 28,
+
+          // 3. 主按钮 (Main Toggle)
+          // 使用 Align 确保它稳稳地在最右侧垂直居中
+          Align(
+            alignment: Alignment.centerRight,
+            child: Container(
+              width: 50, // 调整为 50，比标准的 56 更精致，符合 Web 风格
+              height: 50,
+              decoration: _sharedButtonDecoration(shape: BoxShape.circle), // 统一风格
+              child: Material(
+                color: Colors.transparent,
+                shape: const CircleBorder(),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: _toggleFab,
+                  child: AnimatedBuilder(
+                    animation: _fabController,
+                    builder: (context, child) {
+                      return Transform.rotate(
+                        angle: _fabController.value * 0.75 * 3.14159,
+                        child: Icon(
+                          Icons.add,
+                          color: AppTheme.vultrBlue,
+                          size: 26,
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
+                ),
+              ),
             ),
           ),
         ],
@@ -222,39 +222,59 @@ PersistentKeepalive = 25
       animation: _expandAnimation,
       builder: (context, child) {
         final double value = _expandAnimation.value;
-        // Reduced offsets to minimize whitespace on the right
-        // Index 1 (New): 70.0 from right
-        // Index 2 (Import): 200.0 from right (130.0 gap maintained)
-        final double endOffset = index == 1 ? 70.0 : 200.0; 
-        final double xTranslation = -endOffset * value;
-        // Scale width only (scaleX), keep height (scaleY) at 1.0
-        final double scaleX = 0.4 + (0.6 * value);
-        final double opacity = (value > 0.2 ? 1.0 : value * 5).clamp(0.0, 1.0);
-        final double elevation = (6 * value).clamp(0.0, 6.0);
 
-        return Positioned(
-          right: 0,
+        // 关键点2：大幅减小间距，让它们靠得更近
+        // 主按钮宽50 + 间距12 = 62.
+        // Index 1 (New) 位于 62
+        // Index 2 (Import) 位于 62 + 按钮1宽度(约110) + 间距10 = 约182
+        final double endOffset = index == 1 ? 62.0 : 180.0;
+        final double xTranslation = -endOffset * value;
+
+        final double opacity = (value * 6).clamp(0.0, 1.0);
+        // 减小缩放幅度的差异，让动画看起来更稳
+        final double scale = 0.9 + (0.1 * value);
+
+        // 关键点3：使用 Align 代替 Positioned
+        // 配合 Stack 的 alignment: Alignment.centerRight，
+        // 这里只需要处理水平位移，垂直方向自动绝对居中
+        return Align(
+          alignment: Alignment.centerRight,
           child: Transform.translate(
             offset: Offset(xTranslation, 0),
-            child: Transform(
-              transform: Matrix4.diagonal3Values(scaleX, 1.0, 1.0),
+            child: Transform.scale(
+              scale: scale,
               alignment: Alignment.centerRight,
               child: Opacity(
                 opacity: opacity,
-                child: FloatingActionButton.extended(
-                  heroTag: 'fab_option_$index',
-                  onPressed: onPressed,
-                  backgroundColor: Colors.white,
-                  elevation: elevation,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  extendedPadding: const EdgeInsets.symmetric(horizontal: 16),
-                  icon: Icon(icon, color: AppTheme.vultrBlue, size: 20),
-                  label: Text(
-                    label,
-                    style: GoogleFonts.inter(
-                      color: AppTheme.vultrBlue,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 13,
+                child: Container(
+                  height: 50, // 设定固定高度，比主按钮(50)小，层级分明
+                  decoration: _sharedButtonDecoration(shape: BoxShape.rectangle), // 统一风格
+                  child: Material(
+                    color: Colors.transparent,
+                    borderRadius: BorderRadius.circular(20),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: onPressed,
+                      splashColor: AppTheme.vultrBlue.withOpacity(0.1),
+                      highlightColor: AppTheme.vultrBlue.withOpacity(0.05),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16), // 减小内边距
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(icon, color: AppTheme.vultrBlue, size: 18),
+                            const SizedBox(width: 8),
+                            Text(
+                              label,
+                              style: GoogleFonts.inter(
+                                color: AppTheme.vultrBlue,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -263,6 +283,31 @@ PersistentKeepalive = 25
           ),
         );
       },
+    );
+  }
+
+  // 关键点4：提取公共样式，确保主按钮和小按钮的 阴影、边框、背景色 完全一致
+  BoxDecoration _sharedButtonDecoration({required BoxShape shape}) {
+    return BoxDecoration(
+      color: Colors.white,
+      shape: shape,
+      borderRadius: shape == BoxShape.rectangle ? BorderRadius.circular(20) : null,
+      border: Border.all(color: const Color(0xFFE6E9EF), width: 1), // 统一的极细灰边框
+      boxShadow: [
+        // 统一的淡蓝色弥散阴影
+        BoxShadow(
+          color: AppTheme.vultrBlue.withOpacity(0.15),
+          blurRadius: 12,
+          offset: const Offset(0, 4),
+          spreadRadius: -2,
+        ),
+        // 统一的轮廓阴影
+        BoxShadow(
+          color: Colors.black.withOpacity(0.05),
+          blurRadius: 2,
+          offset: const Offset(0, 1),
+        ),
+      ],
     );
   }
 
