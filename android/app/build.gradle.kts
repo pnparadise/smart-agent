@@ -1,3 +1,6 @@
+import java.io.File
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -30,9 +33,25 @@ android {
         jvmTarget = JavaVersion.VERSION_21.toString()
     }
 
+    val keystoreProps = Properties().apply {
+        val propsFile = File(rootDir, "key.properties")
+        if (propsFile.exists()) {
+            load(propsFile.inputStream())
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            keyAlias = keystoreProps["keyAlias"] as String?
+            keyPassword = keystoreProps["keyPassword"] as String?
+            storeFile = keystoreProps["storeFile"]?.let { file(it.toString()) }
+            storePassword = keystoreProps["storePassword"] as String?
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

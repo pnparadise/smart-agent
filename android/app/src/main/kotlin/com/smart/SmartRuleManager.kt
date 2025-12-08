@@ -1,10 +1,7 @@
 package com.smart
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -13,13 +10,12 @@ import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import java.net.Inet6Address
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -31,20 +27,15 @@ object SmartRuleManager {
     @Volatile
     private var initialized: Boolean = false
 
-    // 任务控制
     private var monitorJob: Job? = null
     private var debounceJob: Job? = null
     private var evalJob: Job? = null
-
-    // 状态缓存
     private var lastEnabled: Boolean? = null
 
-    // [省电优化] 上次评估过的网络状态指纹，用于对比是否需要重新评估
     @Volatile
     private var lastEvaluatedState: NetworkState? = null
-
-    // [智能重试] 当前会话中需要忽略的隧道文件（尝试连接失败过的）
-    // 使用 Set 存储，当网络变更或配置变更时清空，当连接报错时添加
+    // 使用 Network ID 绑定 SSID，避免粘性 SSID 或权限丢失导致的误判
+    private val ssidCache = ConcurrentHashMap<String, String>()
     private val ignoredTunnelFiles = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     enum class NetworkType { WIFI, MOBILE, NONE }
@@ -83,6 +74,7 @@ object SmartRuleManager {
                 startMonitoring()
                 resetIgnoredTunnels()
                 lastEvaluatedState = null
+                ssidCache.clear()
                 enqueueEvaluation(SmartConfigRepository.EventType.APP_START)
                 return
             }
@@ -96,6 +88,7 @@ object SmartRuleManager {
             stopMonitoring()
             resetIgnoredTunnels()
             lastEvaluatedState = null
+            ssidCache.clear()
         }
     }
 
@@ -144,27 +137,12 @@ object SmartRuleManager {
             resetIgnoredTunnels()
 
             val vpnState = VpnStateRepository.vpnState.value
-            val fromTunnel = vpnState.tunnelName ?: "直连"
-
             val tunnels = SmartConfigRepository.getTunnels()
             val resolvedFile = when {
                 active && !targetFile.isNullOrBlank() -> targetFile
                 active -> tunnels.firstOrNull()?.get("file")
                 else -> null
             }
-
-            val toTunnel = if (active) {
-                resolvedFile?.let { file ->
-                    tunnels.firstOrNull { it["file"] == file }?.get("name") ?: file
-                } ?: "直连"
-            } else "直连"
-
-            SmartConfigRepository.logEvent(
-                SmartConfigRepository.EventType.MANUAL,
-                fromTunnel,
-                toTunnel,
-                descPrefix = "手动切换"
-            )
 
             if (active && resolvedFile != null) {
                 startTunnelService(resolvedFile)
@@ -182,11 +160,19 @@ object SmartRuleManager {
             if (!networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return
 
             // 获取当前这一刻的新状态
-            val newState = getNetworkStateFromNetwork(network, networkCapabilities)
+            var newState = getNetworkStateFromNetwork(network, networkCapabilities)
+            val netId = network.toString()
 
-            //如果是 Wi-Fi 且没有 SSID，直接视为“无效/中间”状态，丢弃不处理  Android 会在几百毫秒后发送带有 SSID 的第二次回调
-            if (newState.type == NetworkType.WIFI && newState.ssid.isNullOrBlank()) {
-                return
+            //如果无法获取到ssid参数从缓存获取
+            if (newState.type == NetworkType.WIFI) {
+                if (!newState.ssid.isNullOrBlank()) {
+                    ssidCache[netId] = newState.ssid!!
+                } else {
+                    val cached = ssidCache[netId]
+                    if (!cached.isNullOrBlank()) {
+                        newState = newState.copy(ssid = cached)
+                    }
+                }
             }
 
             synchronized(this@SmartRuleManager) {
@@ -205,25 +191,41 @@ object SmartRuleManager {
                 // 再次获取最新状态（防抖期间可能又变了，或者断了）
                 val finalState = getCurrentNetworkState()
 
+                // 再尝试用缓存补全一次 SSID（防抖期间可能丢失权限）
+                if (finalState.type == NetworkType.WIFI && finalState.ssid.isNullOrBlank()) {
+                    val cached = if (ssidCache.size == 1) ssidCache.values.firstOrNull() else null
+                    if (!cached.isNullOrBlank()) {
+                        val completed = finalState.copy(ssid = cached)
+                        synchronized(this@SmartRuleManager) {
+                            if (isSameLogicalState(lastEvaluatedState, completed)) return@launch
+                            lastEvaluatedState = completed
+                        }
+                        resetIgnoredTunnels()
+                        enqueueEvaluation(SmartConfigRepository.EventType.NETWORK_AVAILABLE)
+                        return@launch
+                    } else {
+                        return@launch
+                    }
+                }
+
                 synchronized(this@SmartRuleManager) {
-                    // 二次检查：可能在 delay 期间状态又变回去了
                     if (isSameLogicalState(lastEvaluatedState, finalState)) return@launch
-                    // 更新快照
                     lastEvaluatedState = finalState
                 }
 
-                // 网络环境变了，清空忽略列表，给所有规则重新尝试的机会
                 resetIgnoredTunnels()
                 enqueueEvaluation(SmartConfigRepository.EventType.NETWORK_AVAILABLE)
             }
         }
 
         override fun onLost(network: Network) {
+            ssidCache.remove(network.toString())
             debounceJob?.cancel()
             debounceJob = scope.launch {
                 delay(500)
                 val activeState = getCurrentNetworkState()
 
+                // 断网时的 SSID 通常为空，这里不需要拦截，因为 type 会变成 MOBILE 或 NONE
                 synchronized(this@SmartRuleManager) {
                     if (isSameLogicalState(lastEvaluatedState, activeState)) return@launch
                     lastEvaluatedState = activeState
@@ -262,6 +264,15 @@ object SmartRuleManager {
         if (!config.enabled) return
 
         val state = getCurrentNetworkState()
+
+        // =========================================================================
+        // [核心修复] 拦截“有 WiFi 但无 SSID”的中间态
+        // =========================================================================
+        if (state.type == NetworkType.WIFI && state.ssid.isNullOrBlank()) {
+            Log.d(TAG, "规则评估跳过: WiFi 已连接但 SSID 未就绪，保持当前状态。")
+            return
+        }
+
         val isConnected = state.type != NetworkType.NONE
 
         // 1. 处理完全断网
@@ -269,16 +280,10 @@ object SmartRuleManager {
             val vpnState = VpnStateRepository.vpnState.value
             if (vpnState.isRunning) {
                 stopTunnelService()
-
                 // 尝试推断断开的是什么网络，用于日志
-                val logType = SmartConfigRepository.EventType.WIFI_DISCONNECTED // 默认
-                // 实际日志记录
                 SmartConfigRepository.logEvent(
-                    logType,
-                    vpnState.tunnelName ?: "Unknown",
-                    "直连",
-                    state.ssid,
-                    descPrefix = "网络完全断开"
+                    SmartConfigRepository.EventType.NETWORK_LOST,
+                    vpnState.tunnelName ?: "Unknown", "直连", state.ssid, descPrefix = "网络完全断开"
                 )
             }
             return

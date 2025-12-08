@@ -188,7 +188,7 @@ class _LogPageBodyState extends State<_LogPageBody> {
                   if (ssid != null) ...[
                     const SizedBox(width: 8),
                     Text(
-                      "WiFi: $ssid",
+                      ssid,
                       style: GoogleFonts.inter(color: AppTheme.textSecondary, fontSize: 12),
                     ),
                   ],
@@ -197,7 +197,7 @@ class _LogPageBodyState extends State<_LogPageBody> {
               if (error != null) ...[
                 const SizedBox(height: 10),
                 Text(
-                  "错误: $error",
+                  error,
                   style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.w600),
                 ),
               ],

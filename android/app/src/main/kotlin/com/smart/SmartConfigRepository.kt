@@ -244,8 +244,8 @@ object SmartConfigRepository {
         APP_START("SmartAgent启动"),
 
         // Log Labels for Network State
-        WIFI_CONNECTED("Wifi已连接"),
-        WIFI_DISCONNECTED("Wifi断开"),
+        WIFI_CONNECTED("WiFi已连接"),
+        WIFI_DISCONNECTED("WiFi已断开"),
         MOBILE_CONNECTED("移动数据已连接"),
         MOBILE_DISCONNECTED("移动数据已断开"),
 

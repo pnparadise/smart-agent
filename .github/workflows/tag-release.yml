@@ -1,0 +1,57 @@
+name: Build Release APK on Tag
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Prepare version info
+        id: version
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          BUILD_NUMBER=$(echo "${TAG_NAME}" | tr -cd '0-9')
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER=1
+          fi
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        run: flutter build apk --release --build-name "$TAG_NAME" --build-number "$BUILD_NUMBER"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-${{ env.TAG_NAME }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/flutter-apk/app-release.apk
+          name: ${{ env.TAG_NAME }}
+          tag_name: ${{ env.TAG_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

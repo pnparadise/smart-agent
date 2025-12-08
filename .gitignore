@@ -5,3 +5,4 @@ pubspec.lock
 /android/.gradle
 /android/gradle/wrapper/gradle-wrapper.jar
 /android/app/.cxx
+/android/local.properties
