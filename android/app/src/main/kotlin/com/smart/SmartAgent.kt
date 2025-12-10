@@ -50,7 +50,6 @@ class SmartAgent : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-
         when (intent?.action) {
             ACTION_START_TUNNEL -> {
                 val tunnelFile = intent.getStringExtra(EXTRA_TUNNEL_FILE)
@@ -58,13 +57,10 @@ class SmartAgent : VpnService() {
                     startVpn(tunnelFile)
                 }
             }
-
             ACTION_STOP_TUNNEL -> {
                 stopVpn()
             }
-
             else -> {
-                // Legacy support or direct start
                 val tunnelFile = intent?.getStringExtra(EXTRA_TUNNEL_FILE)
                 if (tunnelFile != null) {
                     startVpn(tunnelFile)
@@ -123,19 +119,15 @@ class SmartAgent : VpnService() {
     }
 
     private fun startVpn(fileName: String) {
-        val previousState = VpnStateRepository.vpnState.value
-        val previousTunnel = previousState.tunnelName ?: "直连"
         val prepareIntent = VpnService.prepare(this)
         if (prepareIntent != null) {
-            // Request user permission before starting VPN.
             prepareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(prepareIntent)
             showToast("请授权 VPN 以启动隧道")
             return
         }
 
-        val baseName = fileName
-        var targetTunnelName = fileName.substringBeforeLast(".", fileName)
+        val targetTunnelName = fileName.substringBeforeLast(".", fileName)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -150,19 +142,13 @@ class SmartAgent : VpnService() {
         coroutineScope.launch(Dispatchers.IO) {
             try {
                 val tunnelContent = SmartConfigRepository.readTunnelConfig(fileName)
-                    ?: run {
-                        showToast("未找到隧道配置")
-                        return@launch
-                    }
+                    ?: throw IllegalArgumentException("未找到隧道配置")
 
                 var config = Config.parse(ByteArrayInputStream(tunnelContent.toByteArray()))
-
-                // Apply per-app split tunneling if enabled.
                 config = applyAppRuleConfig(config)
                 val appRuleConfig = SmartConfigRepository.appRuleConfig.value
                 activeAppRuleVersion = if (appRuleConfig.enabled) appRuleConfig.version else null
 
-                // Update state early so UI/tile reflect target tunnel immediately.
                 notifyState(
                     VpnState(
                         isRunning = true,
@@ -175,7 +161,6 @@ class SmartAgent : VpnService() {
                     )
                 )
 
-                // Ensure only one tunnel active at a time
                 val oldTunnel = activeTunnel
                 activeTunnel = null
                 oldTunnel?.let { backend.setState(it, Tunnel.State.DOWN, null) }
@@ -186,10 +171,7 @@ class SmartAgent : VpnService() {
                         val me = this
                         coroutineScope.launch(Dispatchers.Main) {
                             when (newState) {
-                                Tunnel.State.UP -> {
-                                    pushStats(targetTunnelName, fileName)
-                                }
-
+                                Tunnel.State.UP -> pushStats(targetTunnelName, fileName)
                                 Tunnel.State.DOWN -> {
                                     if (activeTunnel === me) {
                                         VpnStateRepository.updateState(
@@ -204,9 +186,7 @@ class SmartAgent : VpnService() {
                                         activeAppRuleVersion = null
                                     }
                                 }
-
-                                else -> { /* No-op */
-                                }
+                                else -> {}
                             }
                         }
                     }
@@ -215,30 +195,20 @@ class SmartAgent : VpnService() {
                 activeTunnel = newTunnel
                 updateNotification("已连接 $targetTunnelName")
                 startStatsPolling(targetTunnelName, fileName)
+
             } catch (e: Exception) {
-                activeTunnel = null
+
                 activeAppRuleVersion = null
                 val errorMsg = extractErrorMessage(e)
 
+                //只有当 activeTunnel 为 null 时，才说明没有其他隧道成功上位
+                if (activeTunnel == null) {
+                    stopVpn()
+                }
 
-                // 1. 记录具体的错误日志
-                SmartConfigRepository.logEvent(
-                    SmartConfigRepository.EventType.TUNNEL_ERROR,
-                    targetTunnelName,
-                    "直连",
-                    error = errorMsg,
-                    descPrefix = "启动失败"
-                )
-
-                // 2. 停止当前 VPN 状态 (清理通知栏等)
-                stopVpn()
-
-                // 3. 提示用户
-                showToast("启动隧道失败: $errorMsg")
-
-                // 4. [关键] 通知 RuleManager 进行 Fallback (尝试下一条规则)
-                // 这将触发 evaluateRules(TUNNEL_ERROR)，从而跳过当前规则，寻找备用隧道或直连
-                SmartRuleManager.onTunnelConnectionFailed(fileName)
+                // 2. [逻辑决策] 汇报给 Manager
+                // Manager 会判断当前状态是否发生过变更（竞态条件），决定是否 Fallback。
+                SmartRuleManager.onTunnelStartFailed(fileName, errorMsg)
             }
         }
     }
@@ -329,7 +299,6 @@ class SmartAgent : VpnService() {
         originalInterface.listenPort.ifPresent { ifaceBuilder.setListenPort(it) }
         originalInterface.mtu.ifPresent { ifaceBuilder.setMtu(it) }
 
-        // Only allow the selected apps through the tunnel; WireGuard supports multiple include entries.
         val selected = appRuleConfig.selectedApps.toSet()
         ifaceBuilder.includeApplications(selected)
 
@@ -340,7 +309,6 @@ class SmartAgent : VpnService() {
     }
 
     private fun extractErrorMessage(throwable: Throwable): String {
-        // Handle BackendException with localized reasons
         getBackendErrorChinese(throwable)?.let { return it }
 
         var realError: Throwable? = throwable
@@ -353,21 +321,15 @@ class SmartAgent : VpnService() {
         if (e is BadConfigException) {
             val sb = StringBuilder()
             sb.append("配置错误: ")
-
             val context = runCatching {
                 val prettySection = e.section.getName()
                 val prettyLocation = e.location.getName()
                 "[$prettySection] $prettyLocation"
             }.getOrElse { "[${e.section.name}] ${e.location.name}" }
-
             sb.append(context)
             sb.append(" -> ")
             sb.append(e.reason.name)
-
-            if (!e.text.isNullOrEmpty()) {
-                sb.append(": \"${e.text}\"")
-            }
-
+            if (!e.text.isNullOrEmpty()) sb.append(": \"${e.text}\"")
             e.cause?.message?.let { sb.append("\n(原因: $it)") }
             return sb.toString()
         }
@@ -377,9 +339,7 @@ class SmartAgent : VpnService() {
         e.cause?.let { cause ->
             if (sb.isNotEmpty()) sb.append(": ")
             val causeMsg = cause.message
-            if (causeMsg != null && causeMsg != e.message) {
-                sb.append(causeMsg)
-            }
+            if (causeMsg != null && causeMsg != e.message) sb.append(causeMsg)
         }
         if (sb.isEmpty()) return "${e.javaClass.simpleName} (无错误描述)"
         return sb.toString()

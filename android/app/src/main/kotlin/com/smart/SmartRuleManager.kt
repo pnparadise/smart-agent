@@ -14,8 +14,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.Inet6Address
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -24,6 +24,7 @@ object SmartRuleManager {
     private const val TAG = "SmartRuleManager"
     private lateinit var context: Context
     private val scope = CoroutineScope(Dispatchers.Default)
+
     @Volatile
     private var initialized: Boolean = false
 
@@ -34,7 +35,12 @@ object SmartRuleManager {
 
     @Volatile
     private var lastEvaluatedState: NetworkState? = null
-    // 使用 Network ID 绑定 SSID，避免粘性 SSID 或权限丢失导致的误判
+
+    // 【核心机制】记录当前“意图”连接的目标（令牌）
+    // 只有当报错的文件 == 这个变量时，才视为有效报错，否则视为过期事件直接丢弃
+    @Volatile
+    private var pendingTargetFile: String? = null
+
     private val ssidCache = ConcurrentHashMap<String, String>()
     private val ignoredTunnelFiles = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
@@ -63,9 +69,12 @@ object SmartRuleManager {
     }
 
     /**
-     * Agent 规则配置变更触发
+     * Agent 规则配置变更
      */
-    fun onAgentRuleUpdated(eventType: SmartConfigRepository.EventType?, config: AgentRuleConfig = SmartConfigRepository.agentRuleConfig.value) {
+    fun onAgentRuleUpdated(
+        eventType: SmartConfigRepository.EventType?,
+        config: AgentRuleConfig = SmartConfigRepository.agentRuleConfig.value
+    ) {
         val previouslyEnabled = lastEnabled
         lastEnabled = config.enabled
 
@@ -78,9 +87,8 @@ object SmartRuleManager {
                 enqueueEvaluation(SmartConfigRepository.EventType.APP_START)
                 return
             }
-            // 配置变了，之前的失败记录可能不再适用，重置
+            // 配置逻辑变更，重置忽略列表并重新评估
             resetIgnoredTunnels()
-            // 强制触发评估（配置变更属于逻辑变更，不依赖网络状态变化）
             if (eventType != null) {
                 enqueueEvaluation(eventType)
             }
@@ -93,7 +101,7 @@ object SmartRuleManager {
     }
 
     /**
-     * 应用分流配置变更回调
+     * 应用分流配置变更
      */
     fun onAppRuleUpdated(newConfig: AppRuleConfig) {
         val vpnState = VpnStateRepository.vpnState.value
@@ -112,20 +120,54 @@ object SmartRuleManager {
             tunnelName,
             descPrefix = "重启隧道"
         )
-
+        // 重启也视为新的意图
         startTunnelService(tunnelFile)
     }
 
     /**
-     * 隧道连接失败触发 (Fallback 入口)
+     * 【核心修改】隧道启动失败回调
+     * 由 SmartAgent 在 catch 异常时调用
      */
-    fun onTunnelConnectionFailed(failedTunnelFile: String?) {
-        if (!failedTunnelFile.isNullOrBlank()) {
-            ignoredTunnelFiles.add(failedTunnelFile)
-            Log.d(TAG, "Tunnel failed: $failedTunnelFile, adding to ignore list and re-evaluating.")
+    fun onTunnelStartFailed(failedFile: String, errorMsg: String) {
+        scope.launch {
+            // 1. 竞态条件检查 (Double Check)
+            // 如果报错的文件不是当前 Manager 意图连接的文件，说明由于网络切换或手动干预，
+            // 目标已经变了。此时旧的报错应该被静默丢弃，不应该触发 Fallback。
+            if (failedFile != pendingTargetFile) {
+                Log.d(TAG, "静默忽略过期错误: $failedFile (当前目标是: $pendingTargetFile)")
+                return@launch
+            }
+
+            // 2. 确认是有效错误，执行常规流程
+            val tunnelName = failedFile.substringBeforeLast(".")
+            Log.e(TAG, "隧道启动失败: $failedFile. 原因: $errorMsg")
+
+            // 记录日志
+            SmartConfigRepository.logEvent(
+                SmartConfigRepository.EventType.TUNNEL_ERROR,
+                tunnelName,
+                "直连", // 暂时标记为直连，后续 Fallback 可能会改成其他
+                error = errorMsg,
+                descPrefix = "启动失败"
+            )
+
+            // UI 提示 (MessageBridge 必须在主线程调用)
+            withContext(Dispatchers.Main) {
+                MessageBridge.send("启动隧道失败: $errorMsg")
+            }
+
+            // 3. 将此文件加入“本次会话忽略列表”
+            ignoredTunnelFiles.add(failedFile)
+
+            // 4. 清除当前挂起的意图
+            // 这一步很关键：表示当前对 failedFile 的尝试已经结束（失败了）。
+            // 接下来交给 enqueueEvaluation 决定下一个 pendingTargetFile 是谁。
+            pendingTargetFile = null
+
+            // 5. 触发重新评估 (Fallback)
+            // 评估逻辑会自动跳过 ignoredTunnelFiles 里的文件，寻找下一个匹配项
+            enqueueEvaluation(SmartConfigRepository.EventType.TUNNEL_ERROR)
         }
-        // 触发评估，此时 EventType 为 TUNNEL_ERROR
-        enqueueEvaluation(SmartConfigRepository.EventType.TUNNEL_ERROR)
     }
 
     /**
@@ -133,7 +175,7 @@ object SmartRuleManager {
      */
     fun toggleManualTunnel(targetFile: String?, active: Boolean) {
         scope.launch {
-            // 手动干预属于强制行为，清空之前的自动规则忽略列表
+            // 手动行为具有最高优先级，重置之前的自动忽略记录
             resetIgnoredTunnels()
 
             val vpnState = VpnStateRepository.vpnState.value
@@ -143,6 +185,19 @@ object SmartRuleManager {
                 active -> tunnels.firstOrNull()?.get("file")
                 else -> null
             }
+
+            val targetName = resolvedFile?.let { file ->
+                tunnels.firstOrNull { it["file"] == file }?.get("name") ?: file.substringBeforeLast(".", file)
+            } ?: "直连"
+            val currentName = vpnState.tunnelName ?: "直连"
+            val descPrefix = if (active && resolvedFile != null) "手动开启" else "手动断开"
+
+            SmartConfigRepository.logEvent(
+                SmartConfigRepository.EventType.MANUAL,
+                currentName,
+                targetName,
+                descPrefix = descPrefix
+            )
 
             if (active && resolvedFile != null) {
                 startTunnelService(resolvedFile)
@@ -191,7 +246,7 @@ object SmartRuleManager {
                 // 再次获取最新状态（防抖期间可能又变了，或者断了）
                 val finalState = getCurrentNetworkState()
 
-                // 再尝试用缓存补全一次 SSID（防抖期间可能丢失权限）
+                // 尝试用缓存补全 SSID
                 if (finalState.type == NetworkType.WIFI && finalState.ssid.isNullOrBlank()) {
                     val cached = if (ssidCache.size == 1) ssidCache.values.firstOrNull() else null
                     if (!cached.isNullOrBlank()) {
@@ -213,6 +268,7 @@ object SmartRuleManager {
                     lastEvaluatedState = finalState
                 }
 
+                // 网络变了，之前的忽略列表失效，重置
                 resetIgnoredTunnels()
                 enqueueEvaluation(SmartConfigRepository.EventType.NETWORK_AVAILABLE)
             }
@@ -233,7 +289,6 @@ object SmartRuleManager {
 
                 // 无论变成什么，只要断网或切换，都重置忽略列表
                 resetIgnoredTunnels()
-
                 if (activeState.type != NetworkType.NONE) {
                     // 只是切换（如 Wifi -> 流量）
                     enqueueEvaluation(SmartConfigRepository.EventType.NETWORK_AVAILABLE)
@@ -264,15 +319,6 @@ object SmartRuleManager {
         if (!config.enabled) return
 
         val state = getCurrentNetworkState()
-
-        // =========================================================================
-        // [核心修复] 拦截“有 WiFi 但无 SSID”的中间态
-        // =========================================================================
-        if (state.type == NetworkType.WIFI && state.ssid.isNullOrBlank()) {
-            Log.d(TAG, "规则评估跳过: WiFi 已连接但 SSID 未就绪，保持当前状态。")
-            return
-        }
-
         val isConnected = state.type != NetworkType.NONE
 
         // 1. 处理完全断网
@@ -299,53 +345,56 @@ object SmartRuleManager {
             }
         }
 
-        // 3. 选择目标规则 (Fallback 逻辑)
-        // 从匹配的规则中，找到第一个 "其对应的 tunnelFile 不在 ignoredTunnelFiles 中" 的规则
+        // 3. 寻找有效规则 (Fallback 核心)
+        // 过滤掉 ignoredTunnelFiles 中的文件
         val validRule = matchedRules.firstOrNull { rule ->
             val file = rule.tunnelFile
             // 如果这个文件之前失败过，就跳过它
             !file.isNullOrBlank() && !ignoredTunnelFiles.contains(file)
         }
 
-        // 如果 validRule 为 null，说明所有匹配的规则都失败过一次了，或者根本没匹配上
-        // 此时目标就是 "直连" (Abandon Fallback)
+        // 目标确定
         val targetTunnelFile = validRule?.tunnelFile
         val targetTunnelName = validRule?.tunnelName ?: "直连"
 
-        // 4. 执行状态判断
+        // 4. 判断是否需要动作
         val vpnState = VpnStateRepository.vpnState.value
         val currentTunnel = vpnState.tunnelName ?: "直连"
-
         val appConfig = SmartConfigRepository.appRuleConfig.value
         val appRuleVersionMismatch = vpnState.isRunning && appConfig.enabled && vpnState.appRuleVersion != appConfig.version
-
         val isFallbackTriggered = eventSource == SmartConfigRepository.EventType.TUNNEL_ERROR
 
-        // 判断是否需要动作
         val needSwitch = (currentTunnel != targetTunnelName) ||
-                (isFallbackTriggered && targetTunnelName != "直连") || // 错误重试
-                (eventSource == SmartConfigRepository.EventType.APP_RULE_CHANGED && appRuleVersionMismatch)
+                (isFallbackTriggered && targetTunnelName != "直连") || // 之前失败了，即使目标没变也要重试(但其实 validRule 逻辑会变)
+                (eventSource == SmartConfigRepository.EventType.APP_RULE_CHANGED && appRuleVersionMismatch) ||
+                (targetTunnelFile != null && vpnState.tunnelFile != targetTunnelFile)
 
-        // 5. 动作与日志
+        if (!needSwitch) {
+            // 如果触发了 Fallback 流程，但最终计算结果是直连，且当前已经是直连，记录一下“放弃治疗”
+            if (isFallbackTriggered && targetTunnelName == "直连" && currentTunnel == "直连") {
+                SmartConfigRepository.logEvent(
+                    SmartConfigRepository.EventType.FALLBACK,
+                    "Unknown", "直连", state.ssid, descPrefix = "所有规则均失败，回退直连"
+                )
+            }
+            return
+        }
+
+        // 5. 执行切换
         var actionDesc = "保持连接"
-
         if (needSwitch) {
-            actionDesc = if (isFallbackTriggered) "连接失败，尝试下一规则" else "切换隧道"
+            actionDesc = if (isFallbackTriggered) "尝试下一规则" else "切换隧道"
 
             if (targetTunnelName == "直连") {
                 if (isFallbackTriggered) actionDesc = "所有规则均失败，回退直连"
                 if (vpnState.isRunning) stopTunnelService()
             } else {
                 targetTunnelFile?.let { file ->
-                    val shouldRestart = !vpnState.isRunning || vpnState.tunnelFile != file || isFallbackTriggered || appRuleVersionMismatch
-                    if (shouldRestart) {
-                        startTunnelService(file)
-                    }
+                    startTunnelService(file)
                 }
             }
         }
 
-        // 6. 构造日志类型
         val finalLogType = when {
             isFallbackTriggered -> SmartConfigRepository.EventType.FALLBACK
             eventSource == SmartConfigRepository.EventType.NETWORK_AVAILABLE -> {
@@ -411,36 +460,27 @@ object SmartRuleManager {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val activeNetwork = cm.activeNetwork ?: return NetworkState(NetworkType.NONE)
         val caps = cm.getNetworkCapabilities(activeNetwork) ?: return NetworkState(NetworkType.NONE)
-
         if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
             return NetworkState(NetworkType.NONE)
         }
-
         return getNetworkStateFromNetwork(activeNetwork, caps)
     }
 
     private fun getNetworkStateFromNetwork(network: Network, caps: NetworkCapabilities): NetworkState {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val linkProps = cm.getLinkProperties(network)
-
         val hasIpv6 = linkProps?.linkAddresses?.any {
             it.address is Inet6Address && !it.address.isLinkLocalAddress
         } == true
-
         val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
         val isMobile = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-
         var ssid: String? = null
-        if (isWifi) {
-            ssid = readConnectedSsid(caps)
-        }
-
+        if (isWifi) ssid = readConnectedSsid(caps)
         val type = when {
             isWifi -> NetworkType.WIFI
             isMobile -> NetworkType.MOBILE
             else -> NetworkType.NONE
         }
-
         return NetworkState(type, ssid, hasIpv6)
     }
 
@@ -480,7 +520,12 @@ object SmartRuleManager {
         return ssid
     }
 
+    // --- Intent Helpers (维护 pendingTargetFile) ---
+
     private fun startTunnelService(tunnelFile: String) {
+        // 【关键】更新当前意图，作为后续错误处理的凭证
+        pendingTargetFile = tunnelFile
+
         val intent = Intent(context, SmartAgent::class.java).apply {
             action = SmartAgent.ACTION_START_TUNNEL
             putExtra(SmartAgent.EXTRA_TUNNEL_FILE, tunnelFile)
@@ -493,6 +538,9 @@ object SmartRuleManager {
     }
 
     private fun stopTunnelService() {
+        // 【关键】意图设为 null（即意图是直连），如果有旧的启动失败回调过来，会因为 mismatch 被丢弃
+        pendingTargetFile = null
+
         val intent = Intent(context, SmartAgent::class.java).apply {
             action = SmartAgent.ACTION_STOP_TUNNEL
         }
