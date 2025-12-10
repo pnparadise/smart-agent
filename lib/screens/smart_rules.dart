@@ -14,7 +14,7 @@ class SmartRulesScreen extends StatefulWidget {
   State<SmartRulesScreen> createState() => _SmartRulesScreenState();
 }
 
-class _SmartRulesScreenState extends State<SmartRulesScreen> {
+class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBindingObserver {
   bool _enabled = false;
   bool _appRuleEnabled = false;
   List<String> _selectedApps = [];
@@ -29,6 +29,9 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   bool _isAddingNew = false;
 
   bool _loading = true;
+  bool _batteryProtected = false;
+  bool _pendingBatteryRefresh = false;
+  bool _pendingBatterySettingsAfterRequest = false;
 
   // 滚动控制相关
   final ScrollController _scrollController = ScrollController();
@@ -37,6 +40,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadConfig();
   }
 
@@ -44,7 +48,16 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   void dispose() {
     _ssidController.dispose();
     _scrollController.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _pendingBatteryRefresh) {
+      _handlePendingBatteryRefresh();
+    }
+    super.didChangeAppLifecycleState(state);
   }
 
   // --- Helpers ---
@@ -107,6 +120,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
     try {
       final config = await SmartAgentApi.getSmartConfig();
       final tunnels = await SmartAgentApi.getTunnels();
+      final ignoringBatteryOpt = await SmartAgentApi.isIgnoringBatteryOptimizations();
       if (mounted) {
         setState(() {
           _enabled = config['enabled'] as bool;
@@ -116,11 +130,28 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
               .map((e) => AgentRule.fromMap(Map<String, dynamic>.from(e)))
               .toList();
           _tunnels = tunnels;
+          _batteryProtected = ignoringBatteryOpt;
           _loading = false;
         });
       }
     } catch (e) {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _refreshBatteryStatus() async {
+    final ignoring = await SmartAgentApi.isIgnoringBatteryOptimizations();
+    if (mounted) setState(() => _batteryProtected = ignoring);
+  }
+
+  Future<void> _handlePendingBatteryRefresh() async {
+    _pendingBatteryRefresh = false;
+    await _refreshBatteryStatus();
+    if (_pendingBatterySettingsAfterRequest) {
+      _pendingBatterySettingsAfterRequest = false;
+      if (!_batteryProtected) {
+        await _openBatterySettingsAndQueueRefresh();
+      }
     }
   }
 
@@ -289,7 +320,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
         controller: _scrollController,
         slivers: [
           SliverToBoxAdapter(child: _buildAppRuleCard()),
-          SliverToBoxAdapter(child: _buildHeader()),
+          SliverToBoxAdapter(child: _buildAgentRuleCard()),
 
           if (_enabled)
             SliverReorderableList(
@@ -315,6 +346,9 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
               child: _buildAddButton(),
             ),
 
+          SliverToBoxAdapter(child: _buildBatteryOptimizationCard()),
+          SliverToBoxAdapter(child: _buildAutoStartCard()),
+
           const SliverToBoxAdapter(child: SizedBox(height: 60)),
         ],
       ),
@@ -324,7 +358,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   Widget _buildAppRuleCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -341,7 +375,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('应用分流', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700)),
+                    Text('App Split Tunneling', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700)),
                     const SizedBox(height: 4),
                     Text(
                       '仅勾选的应用流量走隧道',
@@ -392,10 +426,120 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildBatteryOptimizationCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: AppTheme.cardShadow,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Persistent Protection',
+                  style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '关闭电池优化 避免数据断连',
+                  style: GoogleFonts.inter(color: AppTheme.textSecondary, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+          _buildToggleSwitch(
+            value: _batteryProtected,
+            onChanged: (val) async {
+              if (val) {
+                final granted = await SmartAgentApi.requestIgnoreBatteryOptimizations();
+                if (!granted) {
+                  _pendingBatteryRefresh = true;
+                  _pendingBatterySettingsAfterRequest = true;
+                } else {
+                  await _refreshBatteryStatus();
+                  if (!_batteryProtected && mounted) {
+                    Notifier.show(context, 'Please grant the permission to keep Smart Agent active.');
+                  }
+                }
+              } else {
+                await _openBatterySettingsAndQueueRefresh();
+              }
+            },
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutoStartCard() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: AppTheme.cardShadow,
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () async {
+            final ok = await SmartAgentApi.openAutoStartSettings();
+            if (!ok && mounted) {
+              Notifier.show(context, 'Please enable auto start in system settings.');
+            }
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Disable Power Guard',
+                        style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '允许自启与后台活动 保持连接稳定',
+                        style: GoogleFonts.inter(color: AppTheme.textSecondary, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.arrow_forward_ios, size: 16, color: AppTheme.textSecondary),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openBatterySettingsAndQueueRefresh() async {
+    final ok = await SmartAgentApi.openBatteryOptimizationSettings();
+    if (ok) {
+      _pendingBatteryRefresh = true;
+    } else if (mounted) {
+      Notifier.show(context, 'Open system settings to change battery optimization.');
+    }
+  }
+
+  Widget _buildAgentRuleCard() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -446,7 +590,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
   Widget _buildRuleItem(AgentRule rule, int index) {
     final isEditing = rule.id == _editingRuleId;
     final isTemp = rule.id == 'TEMP_NEW_RULE';
-    final double verticalPadding = isTemp ? 12 : 4;
+    const double verticalPadding = 10;
 
     Widget dragHandleWidget = Container(
       color: Colors.transparent,
@@ -456,7 +600,9 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
 
     return Container(
       key: ValueKey(rule.id),
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      // 修改处：如果是新增的临时规则 (isTemp)，下边距设为 0，与 Add Button 保持一致
+      // 否则保持 8，用于规则之间的分隔
+      margin: EdgeInsets.fromLTRB(16, 0, 16, isTemp ? 0 : 8),
       decoration: BoxDecoration(
         boxShadow: isEditing ? AppTheme.cardShadow : null,
       ),
@@ -494,10 +640,10 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
                 ),
                 title: Text(
                   isTemp
-                      ? '新增隧道匹配规则'
+                      ? 'Add Tunnel Rule'
                       : (rule.type == RuleType.wifiSsid ? (rule.value?.isEmpty ?? true ? '配置 WiFi' : 'WiFi: ${rule.value}') : rule.type.label),
                   style: GoogleFonts.inter(
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
                     fontSize: 15,
                     color: AppTheme.textPrimary,
                   ),
@@ -505,7 +651,14 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 subtitle: isTemp
-                    ? null
+                    ? Text(
+                  '新增隧道匹配规则',
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w500,
+                    fontSize: 13,
+                    color: AppTheme.textSecondary,
+                  ),
+                )
                     : Text(
                   'Target: ${rule.tunnelName}',
                   style: GoogleFonts.inter(
@@ -562,7 +715,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
                 alignment: Alignment.topCenter,
                 child: isEditing
                     ? Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -695,7 +848,8 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
                             child: const Text('保存'),
                           ),
                         ],
-                      )
+                      ),
+                      const SizedBox(height: 16),
                     ],
                   ),
                 )
@@ -710,14 +864,14 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
 
   Widget _buildAddButton() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: Material(
           color: Colors.white,
           child: ListTile(
             onTap: _startNewRule,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             leading: Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
@@ -727,11 +881,19 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> {
               child: const Icon(Icons.playlist_add, color: AppTheme.textSecondary, size: 24),
             ),
             title: Text(
-              '新增隧道匹配规则',
+              'Add Tunnel Rule',
               style: GoogleFonts.inter(
-                fontWeight: FontWeight.w600,
+                fontWeight: FontWeight.w700,
                 fontSize: 15,
                 color: AppTheme.textPrimary,
+              ),
+            ),
+            subtitle: Text(
+              '新增隧道匹配规则',
+              style: GoogleFonts.inter(
+                fontWeight: FontWeight.w500,
+                fontSize: 13,
+                color: AppTheme.textSecondary,
               ),
             ),
           ),

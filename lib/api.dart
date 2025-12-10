@@ -94,6 +94,26 @@ class SmartAgentApi {
     });
   }
 
+  static Future<bool> isIgnoringBatteryOptimizations() async {
+    final granted = await _channel.invokeMethod<bool>('isIgnoringBatteryOptimizations');
+    return granted ?? false;
+  }
+
+  static Future<bool> requestIgnoreBatteryOptimizations() async {
+    final granted = await _channel.invokeMethod<bool>('requestIgnoreBatteryOptimizations');
+    return granted ?? false;
+  }
+
+  static Future<bool> openBatteryOptimizationSettings() async {
+    final ok = await _channel.invokeMethod<bool>('openBatteryOptimizationSettings');
+    return ok ?? false;
+  }
+
+  static Future<bool> openAutoStartSettings() async {
+    final ok = await _channel.invokeMethod<bool>('openAutoStartSettings');
+    return ok ?? false;
+  }
+
   static Stream<VpnState> get vpnStateStream {
     return _eventChannel.receiveBroadcastStream().map((event) {
       return VpnState.fromMap(Map<String, dynamic>.from(event));

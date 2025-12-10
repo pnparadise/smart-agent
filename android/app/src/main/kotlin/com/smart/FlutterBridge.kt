@@ -1,24 +1,28 @@
 package com.smart
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
-import android.Manifest
+import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import android.content.ComponentName
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import android.net.wifi.WifiManager
-
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 class FlutterBridge(
     private val activity: Activity,
@@ -202,6 +206,21 @@ class FlutterBridge(
                     result.success(ok)
                 } else result.error("INVALID_ARG", "File is null", null)
             }
+            "isIgnoringBatteryOptimizations" -> {
+                result.success(isIgnoringBatteryOptimizations())
+            }
+            "requestIgnoreBatteryOptimizations" -> {
+                val granted = requestIgnoreBatteryOptimizations()
+                result.success(granted)
+            }
+            "openBatteryOptimizationSettings" -> {
+                val ok = openBatteryOptimizationSettings()
+                result.success(ok)
+            }
+            "openAutoStartSettings" -> {
+                val ok = openAutoStartSettings()
+                result.success(ok)
+            }
             else -> result.notImplemented()
         }
     }
@@ -312,5 +331,169 @@ class FlutterBridge(
             ?.takeIf { it.isNotBlank() && it != "<unknown ssid>" }
 
         return (nearby + configs + listOfNotNull(currentSsid)).distinct()
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+        return pm.isIgnoringBatteryOptimizations(appContext.packageName)
+    }
+
+    private fun requestIgnoreBatteryOptimizations(): Boolean {
+        if (isIgnoringBatteryOptimizations()) return true
+        return try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${appContext.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            activity.startActivity(intent)
+            isIgnoringBatteryOptimizations()
+        } catch (e: Exception) {
+            // Fallback to settings page if direct request fails
+            runCatching {
+                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                activity.startActivity(intent)
+            }
+            false
+        }
+    }
+
+    private fun openBatteryOptimizationSettings(): Boolean {
+        val intents = listOf(
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${appContext.packageName}")
+            }
+        )
+
+        intents.forEach { intent ->
+            val resolved = appContext.packageManager.queryIntentActivities(intent, 0)
+            if (resolved.isNotEmpty()) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                return runCatching {
+                    activity.startActivity(intent)
+                    true
+                }.getOrDefault(false)
+            }
+        }
+        return false
+    }
+
+    private fun openAutoStartSettings(): Boolean {
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        val intents = mutableListOf<Intent>()
+
+        when {
+            manufacturer.contains("huawei") || manufacturer.contains("honor") -> {
+                intents.addAll(
+                    listOf(
+                        Intent(Intent.ACTION_MAIN).setComponent(
+                            ComponentName(
+                                "com.huawei.systemmanager",
+                                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+                            )
+                        ),
+                        Intent(Intent.ACTION_MAIN).setComponent(
+                            ComponentName(
+                                "com.huawei.systemmanager",
+                                "com.huawei.systemmanager.optimize.process.ProtectActivity"
+                            )
+                        ),
+                        Intent(Intent.ACTION_MAIN).setComponent(
+                            ComponentName(
+                                "com.hihonor.systemmanager",
+                                "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+                            )
+                        ),
+                        Intent(Intent.ACTION_MAIN).setComponent(
+                            ComponentName(
+                                "com.hihonor.systemmanager",
+                                "com.hihonor.systemmanager.optimize.process.ProtectActivity"
+                            )
+                        )
+                    )
+                )
+            }
+            manufacturer.contains("xiaomi") -> intents.add(
+                Intent(Intent.ACTION_MAIN).setComponent(
+                    ComponentName(
+                        "com.miui.securitycenter",
+                        "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                    )
+                )
+            )
+            manufacturer.contains("vivo") || manufacturer.contains("iqoo") -> {
+                intents.add(
+                    Intent(Intent.ACTION_MAIN).setComponent(
+                        ComponentName(
+                            "com.iqoo.secure",
+                            "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"
+                        )
+                    )
+                )
+                intents.add(
+                    Intent(Intent.ACTION_MAIN).setComponent(
+                        ComponentName(
+                            "com.vivo.permissionmanager",
+                            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+                        )
+                    )
+                )
+            }
+            manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme") -> {
+                intents.add(
+                    Intent(Intent.ACTION_MAIN).setComponent(
+                        ComponentName(
+                            "com.coloros.phonemanager",
+                            "com.coloros.phonemanager.startupapp.StartupAppListActivity"
+                        )
+                    )
+                )
+                intents.add(
+                    Intent(Intent.ACTION_MAIN).setComponent(
+                        ComponentName(
+                            "com.coloros.safecenter",
+                            "com.coloros.safecenter.startupapp.StartupAppListActivity"
+                        )
+                    )
+                )
+                intents.add(
+                    Intent(Intent.ACTION_MAIN).setComponent(
+                        ComponentName(
+                            "com.oppo.safe",
+                            "com.oppo.safe.permission.startup.StartupAppListActivity"
+                        )
+                    )
+                )
+            }
+        }
+
+        // Generic fallbacks
+        intents.addAll(
+            listOf(
+                Intent(Intent.ACTION_MAIN).setComponent(
+                    ComponentName(
+                        "com.letv.android.letvsafe",
+                        "com.letv.android.letvsafe.AutobootManageActivity"
+                    )
+                ),
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:${appContext.packageName}")
+                }
+            )
+        )
+
+        intents.forEach { intent ->
+            val resolved = appContext.packageManager.queryIntentActivities(intent, 0)
+            if (resolved.isNotEmpty()) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                return runCatching {
+                    activity.startActivity(intent)
+                    true
+                }.getOrDefault(false)
+            }
+        }
+        return false
     }
 }
