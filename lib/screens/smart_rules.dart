@@ -358,7 +358,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   Widget _buildAppRuleCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 12),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -429,7 +429,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   Widget _buildBatteryOptimizationCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -482,7 +482,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   Widget _buildAutoStartCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
@@ -539,7 +539,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   Widget _buildAgentRuleCard() {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      margin:  const EdgeInsets.fromLTRB(16, 0, 16, 12),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -602,7 +602,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       key: ValueKey(rule.id),
       // 修改处：如果是新增的临时规则 (isTemp)，下边距设为 0，与 Add Button 保持一致
       // 否则保持 8，用于规则之间的分隔
-      margin: EdgeInsets.fromLTRB(16, 0, 16, isTemp ? 0 : 8),
+      margin: EdgeInsets.fromLTRB(16, 0, 16, isTemp ? 12 : 8),
       decoration: BoxDecoration(
         boxShadow: isEditing ? AppTheme.cardShadow : null,
       ),
@@ -864,7 +864,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
 
   Widget _buildAddButton() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: Material(

@@ -91,6 +91,12 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        // Avoid restoring Flutter fragments after process death to force a clean start.
+        outState.clear()
+    }
+
     override fun onDestroy() {
         bridgeScope.cancel()
         super.onDestroy()
