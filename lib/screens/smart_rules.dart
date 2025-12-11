@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../api.dart';
@@ -32,6 +34,10 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   bool _batteryProtected = false;
   bool _pendingBatteryRefresh = false;
   bool _pendingBatterySettingsAfterRequest = false;
+  String _appVersion = '-';
+  UpdateStatus _updateStatus = UpdateStatus(state: 'idle');
+  bool _checkingUpdate = false;
+  StreamSubscription<UpdateStatus>? _updateSub;
 
   // 滚动控制相关
   final ScrollController _scrollController = ScrollController();
@@ -42,6 +48,8 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadConfig();
+    _listenUpdates();
+    _loadAppVersion();
   }
 
   @override
@@ -49,6 +57,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     _ssidController.dispose();
     _scrollController.dispose();
     WidgetsBinding.instance.removeObserver(this);
+    _updateSub?.cancel();
     super.dispose();
   }
 
@@ -139,6 +148,21 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     }
   }
 
+  Future<void> _loadAppVersion() async {
+    final version = await SmartAgentApi.getAppVersion();
+    if (mounted) setState(() => _appVersion = version);
+  }
+
+  void _listenUpdates() {
+    _updateSub = SmartAgentApi.updateStream.listen((event) {
+      if (!mounted) return;
+      setState(() => _updateStatus = event);
+      if (event.state == 'error' && event.message != null) {
+        Notifier.show(context, event.message!);
+      }
+    });
+  }
+
   Future<void> _refreshBatteryStatus() async {
     final ignoring = await SmartAgentApi.isIgnoringBatteryOptimizations();
     if (mounted) setState(() => _batteryProtected = ignoring);
@@ -171,6 +195,37 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       appRuleEnabled: _appRuleEnabled,
       selectedApps: _selectedApps,
     );
+  }
+
+  Future<void> _handleVersionTap() async {
+    if (_checkingUpdate || _updateStatus.isActive) return;
+    setState(() => _checkingUpdate = true);
+    try {
+      final info = await SmartAgentApi.checkForUpdate();
+      if (!mounted) return;
+      if (info == null) {
+        Notifier.show(context, '检查更新失败，请稍后重试');
+        return;
+      }
+      if (info.version == _appVersion) {
+        Notifier.show(context, '已是最新版本');
+        return;
+      }
+      final alreadyDownloaded = _updateStatus.latestVersion == info.version && _updateStatus.progress >= 100;
+      setState(() {
+        _updateStatus = alreadyDownloaded
+            ? UpdateStatus(state: 'idle', progress: 100, latestVersion: info.version)
+            : UpdateStatus(state: 'downloading', latestVersion: info.version);
+      });
+      await SmartAgentApi.startUpdateDownload(
+        info.downloadUrl,
+        info.version,
+        size: info.size,
+        digest: info.digest,
+      );
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
   }
 
   void _startNewRule() {
@@ -348,6 +403,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
 
           SliverToBoxAdapter(child: _buildBatteryOptimizationCard()),
           SliverToBoxAdapter(child: _buildAutoStartCard()),
+          SliverToBoxAdapter(child: _buildVersionCard()),
 
           const SliverToBoxAdapter(child: SizedBox(height: 60)),
         ],
@@ -519,6 +575,89 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                   ),
                 ),
                 const Icon(Icons.arrow_forward_ios, size: 16, color: AppTheme.textSecondary),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVersionCard() {
+    final latest = _updateStatus.latestVersion;
+    final hasNewReady = latest != null && latest != _appVersion && !_updateStatus.isActive;
+    final isBusy = _updateStatus.isActive || (_checkingUpdate && !hasNewReady);
+    final progressText = (_updateStatus.progress > 0 && _updateStatus.progress <= 100)
+        ? '${_updateStatus.progress}%'
+        : null;
+    final subtitle = () {
+      if (_updateStatus.isActive) {
+        return '正在更新 ${latest ?? ""}'.trim();
+      }
+      if (hasNewReady) {
+        return '可更新至最新版本 $latest';
+      }
+      return '检查/更新最新版本';
+    }();
+    Widget trailing;
+    if (isBusy) {
+      trailing = SizedBox(
+        width: 32,
+        height: 32,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: const AlwaysStoppedAnimation(AppTheme.vultrBlue),
+              value: progressText != null ? _updateStatus.progress / 100 : null,
+            ),
+            if (progressText != null)
+              Text(
+                progressText,
+                style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: AppTheme.vultrBlue),
+              ),
+          ],
+        ),
+      );
+    } else {
+      trailing = const Icon(Icons.arrow_forward_ios, size: 16, color: AppTheme.textSecondary);
+    }
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: AppTheme.cardShadow,
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: _handleVersionTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Build Version $_appVersion',
+                        style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: GoogleFonts.inter(color: AppTheme.textSecondary, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                trailing,
               ],
             ),
           ),

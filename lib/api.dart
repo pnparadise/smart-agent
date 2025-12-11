@@ -4,6 +4,7 @@ import 'models.dart';
 class SmartAgentApi {
   static const MethodChannel _channel = MethodChannel('com.smart/api');
   static const EventChannel _eventChannel = EventChannel('com.smart/events');
+  static const EventChannel _updateChannel = EventChannel('com.smart/update_events');
 
   static Future<List<LocalTunnel>> getTunnels() async {
     final List<dynamic> result = await _channel.invokeMethod('getTunnels');
@@ -114,9 +115,35 @@ class SmartAgentApi {
     return ok ?? false;
   }
 
+  static Future<String> getAppVersion() async {
+    final result = await _channel.invokeMethod<String>('getAppVersion');
+    return result ?? '0.0.0';
+  }
+
+  static Future<UpdateInfo?> checkForUpdate() async {
+    final result = await _channel.invokeMethod<Map>('checkForUpdate');
+    if (result == null) return null;
+    return UpdateInfo.fromMap(Map<String, dynamic>.from(result));
+  }
+
+  static Future<void> startUpdateDownload(String url, String version, {int? size, String? digest}) async {
+    await _channel.invokeMethod('startUpdateDownload', {
+      'url': url,
+      'version': version,
+      'size': size,
+      'digest': digest,
+    });
+  }
+
   static Stream<VpnState> get vpnStateStream {
     return _eventChannel.receiveBroadcastStream().map((event) {
       return VpnState.fromMap(Map<String, dynamic>.from(event));
+    });
+  }
+
+  static Stream<UpdateStatus> get updateStream {
+    return _updateChannel.receiveBroadcastStream().map((event) {
+      return UpdateStatus.fromMap(Map<String, dynamic>.from(event));
     });
   }
 }

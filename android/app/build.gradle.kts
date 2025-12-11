@@ -53,6 +53,10 @@ android {
         release {
             signingConfig = signingConfigs.getByName("release")
         }
+        debug {
+            // Use the same keystore as release for local debug builds
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
 }
 

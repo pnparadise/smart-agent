@@ -36,9 +36,11 @@ class FlutterBridge(
         const val CHANNEL_API = "com.smart/api"
         const val CHANNEL_EVENTS = "com.smart/events"
         const val CHANNEL_MESSAGES = "com.smart/messages"
+        const val CHANNEL_UPDATES = "com.smart/update_events"
     }
 
     private var eventSink: EventChannel.EventSink? = null
+    private var updateSink: EventChannel.EventSink? = null
 
     fun setup(binaryMessenger: io.flutter.plugin.common.BinaryMessenger) {
         MethodChannel(binaryMessenger, CHANNEL_API).setMethodCallHandler(this)
@@ -65,6 +67,24 @@ class FlutterBridge(
 
             override fun onCancel(arguments: Any?) {
                 MessageBridge.sink = null
+            }
+        })
+
+        EventChannel(binaryMessenger, CHANNEL_UPDATES).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                updateSink = events
+                AppUpdateManager.restoreCachedState(appContext)
+                scope.launch {
+                    AppUpdateManager.updates.collect { status ->
+                        launch(Dispatchers.Main) {
+                            events?.success(status.toMap())
+                        }
+                    }
+                }
+            }
+
+            override fun onCancel(arguments: Any?) {
+                updateSink = null
             }
         })
 
@@ -220,6 +240,39 @@ class FlutterBridge(
             "openAutoStartSettings" -> {
                 val ok = openAutoStartSettings()
                 result.success(ok)
+            }
+            "getAppVersion" -> {
+                val pkgInfo = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+                result.success(pkgInfo.versionName ?: "0.0.0")
+            }
+            "checkForUpdate" -> {
+                scope.launch(Dispatchers.IO) {
+                    val info = AppUpdateManager.fetchLatestRelease()
+                    launch(Dispatchers.Main) {
+                        if (info != null) {
+                            result.success(
+                                mapOf(
+                                    "version" to info.version,
+                                    "downloadUrl" to info.downloadUrl,
+                                    "digest" to info.digest
+                                )
+                            )
+                        } else {
+                            result.success(null)
+                        }
+                    }
+                }
+            }
+            "startUpdateDownload" -> {
+                val url = call.argument<String>("url")
+                val version = call.argument<String>("version")
+                val digest = call.argument<String>("digest")
+                if (url.isNullOrBlank() || version.isNullOrBlank()) {
+                    result.error("INVALID_ARG", "Missing url or version", null)
+                } else {
+                    AppUpdateManager.startDownload(appContext, url, version, digest)
+                    result.success(true)
+                }
             }
             else -> result.notImplemented()
         }

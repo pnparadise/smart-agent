@@ -161,3 +161,51 @@ class LogEntry {
     );
   }
 }
+
+class UpdateInfo {
+  final String version;
+  final String downloadUrl;
+  final int? size;
+  final String? digest;
+
+  UpdateInfo({
+    required this.version,
+    required this.downloadUrl,
+    this.size,
+    this.digest,
+  });
+
+  factory UpdateInfo.fromMap(Map<String, dynamic> map) {
+    return UpdateInfo(
+      version: map['version'] as String,
+      downloadUrl: map['downloadUrl'] as String,
+      size: (map['size'] as num?)?.toInt(),
+      digest: map['digest'] as String?,
+    );
+  }
+}
+
+class UpdateStatus {
+  final String state; // idle, downloading, installing, error
+  final int progress;
+  final String? latestVersion;
+  final String? message;
+
+  UpdateStatus({
+    required this.state,
+    this.progress = 0,
+    this.latestVersion,
+    this.message,
+  });
+
+  bool get isActive => state == 'downloading' || state == 'installing';
+
+  factory UpdateStatus.fromMap(Map<String, dynamic> map) {
+    return UpdateStatus(
+      state: map['state'] as String,
+      progress: (map['progress'] as num?)?.toInt() ?? 0,
+      latestVersion: map['latestVersion'] as String?,
+      message: map['message'] as String?,
+    );
+  }
+}
