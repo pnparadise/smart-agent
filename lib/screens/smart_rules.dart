@@ -7,7 +7,7 @@ import '../models.dart';
 import '../theme.dart';
 import 'app_select.dart';
 import 'log_page.dart';
-import '../widgets/notifier.dart';
+import '../widgets/toast.dart';
 
 class SmartRulesScreen extends StatefulWidget {
   const SmartRulesScreen({super.key});
@@ -158,7 +158,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       if (!mounted) return;
       setState(() => _updateStatus = event);
       if (event.state == 'error' && event.message != null) {
-        Notifier.show(context, event.message!);
+        Toast.showFailure(context, event.message!);
       }
     });
   }
@@ -204,11 +204,11 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       final info = await SmartAgentApi.checkForUpdate();
       if (!mounted) return;
       if (info == null) {
-        Notifier.show(context, '检查更新失败，请稍后重试');
+        Toast.showFailure(context, '检查更新失败,请稍后重试');
         return;
       }
       if (info.version == _appVersion) {
-        Notifier.show(context, '已是最新版本');
+        Toast.showSuccess(context, '已是最新版本');
         return;
       }
       final alreadyDownloaded = _updateStatus.latestVersion == info.version && _updateStatus.progress >= 100;
@@ -323,7 +323,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     if (_formType == RuleType.wifiSsid) {
       final ssid = _ssidController.text.trim();
       if (ssid.isEmpty) {
-        Notifier.show(context, '请填写WiFi SSID');
+        Toast.showFailure(context, '请填写WiFi SSID');
         return;
       }
     }
@@ -522,7 +522,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                 } else {
                   await _refreshBatteryStatus();
                   if (!_batteryProtected && mounted) {
-                    Notifier.show(context, 'Please grant the permission to keep Smart Agent active.');
+                    Toast.showFailure(context, 'Please grant the permission to keep Smart Agent active.');
                   }
                 }
               } else {
@@ -551,7 +551,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
           onTap: () async {
             final ok = await SmartAgentApi.openAutoStartSettings();
             if (!ok && mounted) {
-              Notifier.show(context, 'Please enable auto start in system settings.');
+              Toast.showFailure(context, 'Please enable auto start in system settings.');
             }
           },
           child: Padding(
@@ -587,9 +587,11 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     final latest = _updateStatus.latestVersion;
     final hasNewReady = latest != null && latest != _appVersion && !_updateStatus.isActive;
     final isBusy = _updateStatus.isActive || (_checkingUpdate && !hasNewReady);
-    final progressText = (_updateStatus.progress > 0 && _updateStatus.progress <= 100)
-        ? '${_updateStatus.progress}%'
-        : null;
+    // Only show numeric progress when actively downloading/installing; keep spinner without text otherwise
+    final showNumericProgress = _updateStatus.isActive &&
+        _updateStatus.progress > 0 &&
+        _updateStatus.progress < 100;
+    final progressText = showNumericProgress ? '${_updateStatus.progress}%' : null;
     final subtitle = () {
       if (_updateStatus.isActive) {
         return '正在更新 ${latest ?? ""}'.trim();
@@ -610,7 +612,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
             CircularProgressIndicator(
               strokeWidth: 3,
               valueColor: const AlwaysStoppedAnimation(AppTheme.vultrBlue),
-              value: progressText != null ? _updateStatus.progress / 100 : null,
+              value: showNumericProgress ? _updateStatus.progress / 100 : null,
             ),
             if (progressText != null)
               Text(
@@ -671,7 +673,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     if (ok) {
       _pendingBatteryRefresh = true;
     } else if (mounted) {
-      Notifier.show(context, 'Open system settings to change battery optimization.');
+      Toast.showFailure(context, 'Open system settings to change battery optimization.');
     }
   }
 
@@ -929,13 +931,13 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                                 final granted = await SmartAgentApi.requestLocationPermission();
                                 if (!granted) {
                                   if (!mounted) return;
-                                  Notifier.show(context, '请先授予位置信息权限并开启定位');
+                                  Toast.showFailure(context, '请先授予位置信息权限并开启定位');
                                   return;
                                 }
                                 final ssids = await SmartAgentApi.getSavedSsids();
                                 if (!mounted) return;
                                 if (ssids.isEmpty) {
-                                  Notifier.show(context, '未获取到已保存的WiFi');
+                                  Toast.showFailure(context, '未获取到已保存的WiFi');
                                   return;
                                 }
                                 final selected = await showModalBottomSheet<String>(

@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'debug_log_page.dart';
 
 class LogPage extends StatelessWidget {
   const LogPage({super.key});
@@ -29,6 +30,7 @@ class _LogPageBodyState extends State<_LogPageBody> {
   final ScrollController _scrollController = ScrollController();
   bool _isScrollable = false;
   bool _isLoadingMore = false;
+  bool _showDebugLabel = false;
 
   @override
   void initState() {
@@ -208,6 +210,45 @@ class _LogPageBodyState extends State<_LogPageBody> {
     );
   }
 
+  Widget _buildEmptyState(BuildContext context) {
+    return ListView(
+      controller: _scrollController,
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 40, 16, 0),
+      children: [
+        SizedBox(
+          height: MediaQuery.of(context).size.height * 0.6,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.layers_clear_outlined, size: 48, color: AppTheme.textSecondary),
+                const SizedBox(height: 16),
+                Text(
+                  'No logs yet',
+                  style: GoogleFonts.inter(
+                    color: AppTheme.textSecondary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '记录触发隧道切换的事件',
+                  style: GoogleFonts.inter(
+                    color: AppTheme.textSecondary.withOpacity(0.8),
+                    fontSize: 13,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_loading) {
@@ -227,57 +268,109 @@ class _LogPageBodyState extends State<_LogPageBody> {
                   child: RefreshIndicator(
                     onRefresh: _handleRefresh,
                     child: _logs.isEmpty
-                        ? ListView(
-                            controller: _scrollController,
-                            physics: const AlwaysScrollableScrollPhysics(),
-                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                            children: [
-                              SizedBox(
-                                height: MediaQuery.of(context).size.height * 0.6,
-                                child: Center(
-                                  child: Text('暂无日志', style: GoogleFonts.inter(color: AppTheme.textSecondary)),
-                                ),
-                              ),
-                            ],
-                          )
+                        ? _buildEmptyState(context)
                         : ListView.separated(
                             controller: _scrollController,
                             physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                            itemCount: _logs.length + ((_hasMore || _offset == 0) ? 0 : 1),
+                            itemCount: _logs.length +
+                                ((_hasMore || _isLoadingMore) ? 1 : 0) +
+                                ((_logs.length > 5 && !_hasMore && !_isLoadingMore) ? 1 : 0),
                             separatorBuilder: (_, __) => const SizedBox(height: 10),
                             itemBuilder: (context, index) {
-                            final showEnd = !_hasMore && _offset > 0;
-                            if (showEnd && index == _logs.length) {
-                              return Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 12),
-                                child: Center(
-                                  child: Text('已经到底了', style: GoogleFonts.inter(color: AppTheme.textSecondary)),
-                                ),
-                              );
-                            }
-                              return _buildLogItem(_logs[index]);
+                              final hasLoader = (_hasMore || _isLoadingMore);
+                              final showEnd = (_logs.length > 5 && !_hasMore && !_isLoadingMore);
+                              if (index < _logs.length) {
+                                return _buildLogItem(_logs[index]);
+                              }
+                              if (hasLoader && index == _logs.length) {
+                                return const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(child: CircularProgressIndicator()),
+                                );
+                              }
+                              if (showEnd && index == _logs.length + (hasLoader ? 1 : 0)) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 12),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Divider(
+                                          color: AppTheme.textSecondary.withOpacity(0.12),
+                                          thickness: 1,
+                                        ),
+                                      ),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                                        child: Text(
+                                          '已经到底了',
+                                          style: GoogleFonts.inter(color: AppTheme.textSecondary),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: Divider(
+                                          color: AppTheme.textSecondary.withOpacity(0.12),
+                                          thickness: 1,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }
+                              return const SizedBox.shrink();
                             },
                           ),
-                  ),
-                ),
+                      ),
+                    ),
                 if (_logs.isNotEmpty)
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
                     color: AppTheme.background,
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        await SmartAgentApi.clearLogs();
-                        _handleRefresh();
+                    child: GestureDetector(
+                      onLongPressStart: (_) {
+                        setState(() {
+                          _showDebugLabel = true;
+                        });
                       },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.vultrBlue,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      onLongPressEnd: (_) {
+                        setState(() {
+                          _showDebugLabel = false;
+                        });
+                        if (!mounted) return;
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const DebugLogPage()),
+                        );
+                      },
+                      onLongPressCancel: () {
+                        setState(() {
+                          _showDebugLabel = false;
+                        });
+                      },
+                      child: Material(
+                        color: AppTheme.vultrBlue,
+                        borderRadius: BorderRadius.circular(10),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: () async {
+                            if (_showDebugLabel) return;
+                            await SmartAgentApi.clearLogs();
+                            _handleRefresh();
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            child: Center(
+                              child: Text(
+                                _showDebugLabel ? '查看调试日志' : '清空日志',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                      child: Text('清空日志', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
                     ),
                   )
               ],

@@ -3,7 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
-import '../widgets/notifier.dart';
+import '../widgets/toast.dart';
 import 'tunnel_edit.dart';
 
 class TunnelListScreen extends StatefulWidget {
@@ -150,7 +150,9 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
             onPressed: () async {
               _toggleFab();
               final success = await SmartAgentApi.importConfig();
-              if (success) _loadTunnels();
+              if (success) {
+                _loadTunnels();
+              }
             },
           ),
 
@@ -410,7 +412,7 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
           child: InkWell(
             onTap: () async {
               if (isActive) {
-                Notifier.show(context, '请先关闭隧道后再编辑配置');
+                Toast.showFailure(context, '请先关闭隧道后再编辑配置');
                 return;
               }
               final saved = await Navigator.of(context).push<bool>(
@@ -424,7 +426,7 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
             },
             onLongPress: () async {
               if (isActive) {
-                Notifier.show(context, '正在使用的隧道无法删除');
+                Toast.showFailure(context, '正在使用的隧道无法删除');
                 return;
               }
               final confirm = await showDialog<bool>(
@@ -447,7 +449,7 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
                     _tunnels.removeWhere((t) => t.file == tunnel.file);
                   });
                 } else {
-                  Notifier.show(context, '删除失败');
+                  Toast.showFailure(context, '删除失败');
                 }
               }
             },

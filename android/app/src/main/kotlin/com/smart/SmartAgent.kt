@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.smart.component.SmartToast
 import java.io.ByteArrayInputStream
 
 class SmartAgent : VpnService() {
@@ -123,7 +124,7 @@ class SmartAgent : VpnService() {
         if (prepareIntent != null) {
             prepareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(prepareIntent)
-            showToast("请授权 VPN 以启动隧道")
+            SmartToast.showFailure(this, "请授权 VPN 以启动隧道")
             return
         }
 
@@ -369,9 +370,4 @@ class SmartAgent : VpnService() {
         return if (!causeMsg.isNullOrBlank()) "$mainMsg\n(详细原因: $causeMsg)" else mainMsg
     }
 
-    private fun showToast(message: String) {
-        coroutineScope.launch(Dispatchers.Main) {
-            MessageBridge.send(message)
-        }
-    }
 }

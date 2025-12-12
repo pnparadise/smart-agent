@@ -14,6 +14,7 @@ import androidx.lifecycle.lifecycleScope
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import com.smart.component.SmartToast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,6 +24,7 @@ import java.io.IOException
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.smart/vpn"
+
     private var methodChannel: MethodChannel? = null
     private val bridgeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var flutterBridge: FlutterBridge
@@ -42,13 +44,11 @@ class MainActivity : FlutterActivity() {
                     startVpnService()
                     result.success(null)
                 }
-                // In this architecture, start/stop are handled automatically by SmartAgent
-                // based on network state. Manual start/stop could be added if needed.
                 else -> result.notImplemented()
             }
         }
 
-        // Initialize smart rules and bridge for Method/Event channels used by Flutter.
+        SmartToast.attach(this)
         SmartRuleManager.init(applicationContext)
         flutterBridge = FlutterBridge(
             activity = this,
@@ -79,7 +79,6 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         requestPostNotificationPermissionIfNeeded()
 
-        // Observe VPN state changes and send them to Flutter
         lifecycleScope.launch {
             VpnStateRepository.vpnState.collect { vpnState ->
                 val stateMap = mapOf(
@@ -93,7 +92,6 @@ class MainActivity : FlutterActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        // Avoid restoring Flutter fragments after process death to force a clean start.
         outState.clear()
     }
 
@@ -124,7 +122,7 @@ class MainActivity : FlutterActivity() {
                 }
             } else {
                 pendingTunnelFile = null
-                MessageBridge.send("VPN 权限未授予")
+                SmartToast.showFailure(this, "VPN 权限未授予")
             }
         } else if (requestCode == importTunnelRequest) {
             val callback = pendingImportCallback
@@ -192,11 +190,11 @@ class MainActivity : FlutterActivity() {
         }
 
         content.onSuccess { text ->
-            MessageBridge.send("已导入隧道配置: $displayName")
             SmartConfigRepository.registerTunnel(displayName, rawFileName, text)
+            SmartToast.showSuccess(this, "已导入隧道配置: $displayName")
             callback?.invoke(true)
         }.onFailure {
-            MessageBridge.send("导入失败: ${it.message}")
+            SmartToast.showFailure(this, "导入失败: ${it.message}")
             callback?.invoke(false)
         }
     }

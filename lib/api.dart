@@ -49,6 +49,14 @@ class SmartAgentApi {
     return result.map((e) => LogEntry.fromMap(Map<String, dynamic>.from(e))).toList();
   }
 
+  static Future<List<LogEntry>> getDebugLogs({int limit = 10, int offset = 0}) async {
+    final List<dynamic> result = await _channel.invokeMethod('getDebugLogs', {
+      'limit': limit,
+      'offset': offset,
+    });
+    return result.map((e) => LogEntry.fromMap(Map<String, dynamic>.from(e))).toList();
+  }
+
   static Future<void> clearLogs() async {
     await _channel.invokeMethod('clearLogs');
   }

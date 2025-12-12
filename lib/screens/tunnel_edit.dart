@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
-import '../widgets/notifier.dart';
+import '../widgets/toast.dart';
 
 class TunnelEditPage extends StatefulWidget {
   final LocalTunnel tunnel;
@@ -95,10 +95,10 @@ class _TunnelEditPageState extends State<TunnelEditPage> {
     setState(() => _saving = false);
     if (!mounted) return;
     if (ok) {
-      Notifier.show(context, '已保存配置');
+      Toast.showSuccess(context, '已保存配置');
       Navigator.of(context).pop(true);
     } else {
-      Notifier.show(context, '保存失败');
+      Toast.showFailure(context, '保存失败');
     }
   }
 

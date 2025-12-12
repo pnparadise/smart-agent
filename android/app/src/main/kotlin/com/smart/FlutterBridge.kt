@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import com.smart.component.SmartToast
 
 class FlutterBridge(
     private val activity: Activity,
@@ -35,8 +36,8 @@ class FlutterBridge(
     companion object {
         const val CHANNEL_API = "com.smart/api"
         const val CHANNEL_EVENTS = "com.smart/events"
-        const val CHANNEL_MESSAGES = "com.smart/messages"
         const val CHANNEL_UPDATES = "com.smart/update_events"
+        const val CHANNEL_TOAST = "com.smart/toast"
     }
 
     private var eventSink: EventChannel.EventSink? = null
@@ -44,6 +45,28 @@ class FlutterBridge(
 
     fun setup(binaryMessenger: io.flutter.plugin.common.BinaryMessenger) {
         MethodChannel(binaryMessenger, CHANNEL_API).setMethodCallHandler(this)
+        MethodChannel(binaryMessenger, CHANNEL_TOAST).setMethodCallHandler { call, result ->
+            val msg = call.argument<String>("msg") ?: ""
+            when (call.method) {
+                "showSuccess" -> {
+                    SmartToast.showSuccess(activity, msg)
+                    result.success(null)
+                }
+                "showInfo" -> {
+                    SmartToast.showInfo(activity, msg)
+                    result.success(null)
+                }
+                "showFailure" -> {
+                    SmartToast.showFailure(activity, msg)
+                    result.success(null)
+                }
+                "showText" -> {
+                    SmartToast.showText(activity, msg)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         EventChannel(binaryMessenger, CHANNEL_EVENTS).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 eventSink = events
@@ -60,16 +83,6 @@ class FlutterBridge(
                 VpnStateRepository.setUiListening(false)
             }
         })
-        EventChannel(binaryMessenger, CHANNEL_MESSAGES).setStreamHandler(object : EventChannel.StreamHandler {
-            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                MessageBridge.sink = events
-            }
-
-            override fun onCancel(arguments: Any?) {
-                MessageBridge.sink = null
-            }
-        })
-
         EventChannel(binaryMessenger, CHANNEL_UPDATES).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 updateSink = events
@@ -192,6 +205,11 @@ class FlutterBridge(
                 val limit = call.argument<Int>("limit") ?: 10
                 val offset = call.argument<Int>("offset") ?: 0
                 result.success(SmartConfigRepository.getLogs(limit, offset))
+            }
+            "getDebugLogs" -> {
+                val limit = call.argument<Int>("limit") ?: 10
+                val offset = call.argument<Int>("offset") ?: 0
+                result.success(SmartConfigRepository.getDebugLogs(limit, offset))
             }
             "clearLogs" -> {
                 SmartConfigRepository.clearLogs()

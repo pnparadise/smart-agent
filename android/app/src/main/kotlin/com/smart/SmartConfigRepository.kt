@@ -217,6 +217,10 @@ object SmartConfigRepository {
         error: String? = null,
         descPrefix: String? = null
     ) {
+        if (!::db.isInitialized) {
+            android.util.Log.w("SmartAgent", "logEvent skipped before init: $type")
+            return
+        }
         val map = mutableMapOf(
             "type" to type.label,
             "from" to from,
@@ -229,10 +233,34 @@ object SmartConfigRepository {
         db.insertLog(System.currentTimeMillis(), msg)
     }
 
-    fun getLogs(limit: Int = 10, offset: Int = 0): List<Map<String, Any>> {
-        return db.getLogs(limit, offset).map { (ts, msg) ->
-            mapOf("timestamp" to ts, "message" to msg)
+    fun logDebug(message: String, tag: String? = null, level: String = "DEBUG") {
+        val map = mutableMapOf<String, String>(
+            "type" to level,
+            "message" to message
+        )
+        if (!tag.isNullOrBlank()) {
+            map["tag"] = tag
         }
+        val jsonStr = json.encodeToString(
+            kotlinx.serialization.json.JsonObject.serializer(),
+            kotlinx.serialization.json.JsonObject(map.mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) })
+        )
+        val resolvedTag = tag ?: "SmartAgent"
+        when (level) {
+            "ERROR" -> android.util.Log.e(resolvedTag, message)
+            "INFO" -> android.util.Log.i(resolvedTag, message)
+            else -> android.util.Log.d(resolvedTag, message)
+        }
+        if (!::db.isInitialized) return
+        db.insertDebugLog(System.currentTimeMillis(), jsonStr)
+    }
+
+    fun getLogs(limit: Int = 10, offset: Int = 0): List<Map<String, Any>> {
+        return db.getLogs(limit, offset).map { (ts, msg) -> mapOf("timestamp" to ts, "message" to msg) }
+    }
+
+    fun getDebugLogs(limit: Int = 10, offset: Int = 0): List<Map<String, Any>> {
+        return db.getDebugLogs(limit, offset).map { (ts, msg) -> mapOf("timestamp" to ts, "message" to msg) }
     }
 
     fun clearLogs() {

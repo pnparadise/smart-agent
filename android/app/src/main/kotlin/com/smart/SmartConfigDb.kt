@@ -9,7 +9,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private const val DB_NAME = "smart_config.db"
-private const val DB_VERSION = 8
+private const val DB_VERSION = 9
 
 class SmartConfigDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
 
@@ -63,6 +63,15 @@ class SmartConfigDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             )
             """.trimIndent()
         )
+        db.execSQL(
+            """
+            CREATE TABLE debug_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                message TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -72,6 +81,7 @@ class SmartConfigDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         db.execSQL("DROP TABLE IF EXISTS agent_rules")
         db.execSQL("DROP TABLE IF EXISTS tunnels")
         db.execSQL("DROP TABLE IF EXISTS logs")
+        db.execSQL("DROP TABLE IF EXISTS debug_logs")
         onCreate(db)
     }
 
@@ -266,23 +276,53 @@ class SmartConfigDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         )
     }
 
+    fun insertDebugLog(timestamp: Long, message: String) {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            put("timestamp", timestamp)
+            put("message", message)
+        }
+        db.insert("debug_logs", null, values)
+        db.execSQL(
+            """
+            DELETE FROM debug_logs WHERE id NOT IN (
+                SELECT id FROM debug_logs ORDER BY id DESC LIMIT 500
+            )
+            """.trimIndent()
+        )
+    }
+
     fun getLogs(limit: Int = 10, offset: Int = 0): List<Pair<Long, String>> {
         val db = readableDatabase
         return db.rawQuery(
             "SELECT timestamp, message FROM logs ORDER BY id DESC LIMIT ? OFFSET ?",
             arrayOf(limit.toString(), offset.toString())
-        )
-            .use { cursor ->
-                val list = mutableListOf<Pair<Long, String>>()
-                while (cursor.moveToNext()) {
-                    list.add(cursor.getLong(0) to cursor.getString(1))
-                }
-                list.toList()
+        ).use { cursor ->
+            val list = mutableListOf<Pair<Long, String>>()
+            while (cursor.moveToNext()) {
+                list.add(cursor.getLong(0) to cursor.getString(1))
             }
+            list.toList()
+        }
+    }
+
+    fun getDebugLogs(limit: Int = 10, offset: Int = 0): List<Pair<Long, String>> {
+        val db = readableDatabase
+        return db.rawQuery(
+            "SELECT timestamp, message FROM debug_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+            arrayOf(limit.toString(), offset.toString())
+        ).use { cursor ->
+            val list = mutableListOf<Pair<Long, String>>()
+            while (cursor.moveToNext()) {
+                list.add(cursor.getLong(0) to cursor.getString(1))
+            }
+            list.toList()
+        }
     }
 
     fun clearLogs() {
         val db = writableDatabase
         db.delete("logs", null, null)
+        db.delete("debug_logs", null, null)
     }
 }

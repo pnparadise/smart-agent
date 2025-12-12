@@ -9,8 +9,8 @@ import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
-import android.util.Log
 import kotlinx.coroutines.*
+import com.smart.component.SmartToast
 import java.net.Inet6Address
 
 object SmartRuleManager {
@@ -66,7 +66,11 @@ object SmartRuleManager {
         val type: NetworkType,
         val ssid: String? = null,
         val hasIpv6: Boolean = false
-    )
+    ) {
+        override fun toString(): String {
+            return "[Type: $type, SSID: ${ssid ?: "NULL"}, IPv6: $hasIpv6]"
+        }
+    }
 
     // --- 初始化与配置 ---
 
@@ -77,6 +81,7 @@ object SmartRuleManager {
             initialized = true
             this.context = context.applicationContext
             SmartConfigRepository.init(context)
+            logDebug("SmartRuleManager init completed", level = "INFO")
         }
 
         scope.launch {
@@ -87,12 +92,20 @@ object SmartRuleManager {
     }
 
     private fun handleCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return
+        val isInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        logDebug("[Callback] NetID: $network, Internet: $isInternet, Validated: $isValidated", level = "VERBOSE")
+
+        if (!isInternet) return
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
 
         val newState = extractNetworkStateFromHandle(network, caps)
         synchronized(availableNetworks) {
+            val oldState = availableNetworks[network]
             availableNetworks[network] = newState
+            if (oldState?.ssid != newState.ssid) {
+                logDebug("[MapUpdate] NetID: $network 状态变更. 旧: ${oldState?.ssid}, 新: ${newState.ssid}")
+            }
         }
         recalculateGlobalState()
     }
@@ -112,8 +125,23 @@ object SmartRuleManager {
     private fun recalculateGlobalState() {
         networkEvaluationJob?.cancel()
         networkEvaluationJob = scope.launch {
+            // [排查点 4]：开始防抖
             delay(300)
-            val bestState = resolveBestNetwork()
+            var bestState = resolveBestNetwork()
+
+            // 【关键排查逻辑：迟到的 SSID】
+            if (bestState.type == NetworkType.WIFI && bestState.ssid == null) {
+                logDebug("[LateCheck] 发现 WiFi 已连接但 SSID 缺失，尝试强制补救读取...", level = "WARN")
+                val rawFallback = getSsidFromWifiManagerFallback()
+                val lateSsid = normalizeSsid(rawFallback)
+                if (lateSsid != null) {
+                    logDebug("[LateCheck] 补救成功！获取到 SSID: $lateSsid", level = "INFO")
+                    bestState = bestState.copy(ssid = lateSsid)
+                } else {
+                    logDebug("[LateCheck] 补救失败。WifiManager 返回 raw: ${rawFallback ?: "NULL"}", level = "ERROR")
+                }
+            }
+
             val event = if (bestState.type == NetworkType.NONE)
                 SmartConfigRepository.EventType.NETWORK_LOST
             else SmartConfigRepository.EventType.NETWORK_AVAILABLE
@@ -122,6 +150,7 @@ object SmartRuleManager {
     }
 
     private fun handleNetworkLost(network: Network) {
+        logDebug("[Callback] Network Lost: $network")
         synchronized(availableNetworks) {
             availableNetworks.remove(network)
         }
@@ -145,7 +174,7 @@ object SmartRuleManager {
                         ignoredTunnels = emptySet(),
                         pendingTargetFile = null
                     )
-                    Log.i(TAG, "规则引擎已启动，等待网络回调建立状态快照...")
+                    logDebug("规则引擎已启动，等待网络回调建立状态快照...", level = "INFO")
                 } else {
                     // 情况2: 仅仅是更新了配置 -> 重置黑名单，保留网络状态
                     state = state.copy(
@@ -195,7 +224,7 @@ object SmartRuleManager {
             val shouldTriggerFallback = synchronized(this@SmartRuleManager) {
                 // 关键校验：如果当前意图已经变了，说明用户可能手动切了网络或关了开关，旧的错误应忽略
                 if (state.pendingTargetFile != failedFile) {
-                    Log.d(TAG, "静默忽略过期错误: $failedFile, 当前意图: ${state.pendingTargetFile}")
+                    logDebug("静默忽略过期错误: $failedFile, 当前意图: ${state.pendingTargetFile}")
                     return@synchronized false
                 }
 
@@ -209,9 +238,9 @@ object SmartRuleManager {
 
             if (!shouldTriggerFallback) return@launch
 
-            // 2. 只有有效错误才记录日志和弹窗
+            // 2. 只有有效错误才记录日志并提示
             val tunnelName = failedFile.substringBeforeLast(".")
-            Log.e(TAG, "隧道启动失败: $failedFile. 原因: $errorMsg")
+            logDebug("隧道启动失败: $failedFile. 原因: $errorMsg", level = "ERROR")
 
             SmartConfigRepository.logEvent(
                 SmartConfigRepository.EventType.TUNNEL_ERROR,
@@ -219,7 +248,7 @@ object SmartRuleManager {
             )
 
             withContext(Dispatchers.Main) {
-                MessageBridge.send("启动隧道失败: $errorMsg")
+                SmartToast.showText(context, "启动隧道失败: $errorMsg")
             }
 
             // 3. 触发重新评估 (Fallback)
@@ -267,7 +296,7 @@ object SmartRuleManager {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             object : ConnectivityManager.NetworkCallback(ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
                 init {
-                    Log.d(TAG, "NetworkCallback initialized with FLAG_INCLUDE_LOCATION_INFO (S+)")
+                    logDebug("NetworkCallback initialized with FLAG_INCLUDE_LOCATION_INFO (S+)")
                 }
 
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
@@ -278,7 +307,7 @@ object SmartRuleManager {
         } else {
             object : ConnectivityManager.NetworkCallback() {
                 init {
-                    Log.d(TAG, "NetworkCallback initialized without location flag (pre-S)")
+                    logDebug("NetworkCallback initialized without location flag (pre-S)")
                 }
 
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
@@ -303,7 +332,10 @@ object SmartRuleManager {
             val oldState = state
 
             // 再次 Check 防止乱序
-            if (isSameLogicalState(oldState.network, currentState)) return
+            if (isSameLogicalState(oldState.network, currentState)) {
+                logDebug("[Evaluate] 状态未变，忽略. Old: ${oldState.network}, New: $currentState", level = "VERBOSE")
+                return
+            }
 
             val oldFingerprint = oldState.envFingerprint
 
@@ -314,12 +346,10 @@ object SmartRuleManager {
             // 策略：只有当网络真正连上，且指纹发生变化时，才重置黑名单
             // 如果只是断网 (NONE)，我们暂时保留黑名单，防止网络闪断导致重试循环
             if (currentState.type != NetworkType.NONE && oldFingerprint != newFingerprint) {
-                Log.i(TAG, "环境变更 ($oldFingerprint -> $newFingerprint)，重置失败记录")
+                logDebug("环境变更 ($oldFingerprint -> $newFingerprint)，重置失败记录", level = "INFO")
                 newState = newState.copy(ignoredTunnels = emptySet())
             } else {
-                if (currentState.type != NetworkType.NONE) {
-                    Log.d(TAG, "环境波动但指纹未变 ($newFingerprint)，保留失败记录")
-                }
+                logDebug("[Evaluate] 状态更新: $currentState (指纹未变/断网)")
             }
 
             state = newState
@@ -353,6 +383,8 @@ object SmartRuleManager {
         val netState = preCalculatedState ?: snapshot.network ?: getCurrentNetworkState()
         val isConnected = netState.type != NetworkType.NONE
 
+        logDebug("[RuleCheck] 开始匹配规则. Event: $eventSource, NetState: $netState")
+
         // 1. 处理完全断网
         if (!isConnected) {
             val vpnState = VpnStateRepository.vpnState.value
@@ -370,7 +402,11 @@ object SmartRuleManager {
         val matchedRules = config.rules.filter { rule ->
             if (!rule.enabled) return@filter false
             when (rule.type) {
-                RuleType.WIFI_SSID -> (netState.type == NetworkType.WIFI) && netState.ssid == rule.value
+                RuleType.WIFI_SSID -> {
+                    val match = (netState.type == NetworkType.WIFI) && netState.ssid == rule.value
+                    if (match) logDebug("   -> 匹配成功: SSID=${rule.value}")
+                    match
+                }
                 RuleType.IPV6_AVAILABLE -> netState.hasIpv6
                 RuleType.IPV4_AVAILABLE -> true
             }
@@ -440,6 +476,7 @@ object SmartRuleManager {
             state = state.copy(pendingTargetFile = tunnelFile)
         }
 
+        logDebug("startTunnelService -> $tunnelFile", level = "INFO")
         val intent = Intent(context, SmartAgent::class.java).apply {
             action = SmartAgent.ACTION_START_TUNNEL
             putExtra(SmartAgent.EXTRA_TUNNEL_FILE, tunnelFile)
@@ -457,6 +494,7 @@ object SmartRuleManager {
             state = state.copy(pendingTargetFile = null)
         }
 
+        logDebug("stopTunnelService invoked", level = "INFO")
         val intent = Intent(context, SmartAgent::class.java).apply {
             action = SmartAgent.ACTION_STOP_TUNNEL
         }
@@ -486,6 +524,7 @@ object SmartRuleManager {
                 .build()
             try {
                 cm.registerNetworkCallback(request, networkCallback)
+                logDebug("Network monitoring registered", level = "INFO")
             } catch (e: Exception) { e.printStackTrace() }
         }
     }
@@ -519,30 +558,41 @@ object SmartRuleManager {
 
         var ssid: String? = null
         if (isWifi) {
+            val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             var rawSsid: String? = null
+            var source = "None"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val info = caps.transportInfo
                 if (info is WifiInfo) {
                     rawSsid = info.ssid
                 }
-                Log.d(TAG, "SSID from transportInfo (Q+): ${rawSsid ?: "null"}")
+                source = "TransportInfo(Q+)"
             } else {
                 // 兼容旧版：TransportInfo 不包含 SSID，返回 null
                 rawSsid = null
-                Log.d(TAG, "SSID from transportInfo (pre-Q): ${rawSsid ?: "null"}")
+                source = "TransportInfo(pre-Q)"
             }
 
             // 优先使用 transportInfo 的值，并经过 normalize 过滤 "<unknown ssid>"
             val normalizedRaw = normalizeSsid(rawSsid)
             if (normalizedRaw == null) {
                 // 尝试使用 WifiManager 作为兜底（在部分设备上 transportInfo 可能拿不到）
-                ssid = normalizeSsid(getSsidFromWifiManagerFallback())
-                Log.d(TAG, "SSID fallback via WifiManager: ${ssid ?: "null"}")
+                val fallbackRaw = getSsidFromWifiManagerFallback()
+                ssid = normalizeSsid(fallbackRaw)
+                source = "WifiManagerFallback(Raw: ${fallbackRaw ?: "null"})"
             } else {
                 ssid = normalizedRaw
             }
 
-            Log.d(TAG, "SSID resolved after normalize: ${ssid ?: "null"}")
+            if (ssid == null && isValidated) {
+                logDebug("警告：网络已验证 (Validated) 但仍无法获取 SSID。请检查位置权限！")
+            } else if (isValidated) {
+                logDebug("网络已验证 (Validated)，确认获取到 SSID: ${ssid ?: "null"}")
+            } else {
+                logDebug("SSID resolved after normalize: ${ssid ?: "null"}")
+            }
+
+            logDebug("[Extract] SSID提取结果: ${ssid ?: "null"}. 来源: $source. Validated: ${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}")
         }
 
         // 提取 IPv6
@@ -558,17 +608,26 @@ object SmartRuleManager {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val activeNetwork = cm.activeNetwork ?: return NetworkState(NetworkType.NONE)
         val caps = cm.getNetworkCapabilities(activeNetwork) ?: return NetworkState(NetworkType.NONE)
-        return extractNetworkStateFromHandle(activeNetwork, caps)
+        val state = extractNetworkStateFromHandle(activeNetwork, caps)
+        logDebug("[ActiveState] $state", level = "VERBOSE")
+        return state
     }
 
     private fun getSsidFromWifiManagerFallback(): String? {
         return try {
             val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             val info = wm.connectionInfo ?: return null
-            info.ssid
+            val ssid = info.ssid
+            logDebug("WifiManager fallback SSID: ${ssid ?: "null"}", level = "VERBOSE")
+            ssid
         } catch (e: Exception) {
+            logDebug("WifiManager Fallback Error: ${e.message}", level = "ERROR")
             null
         }
+    }
+
+    private fun logDebug(message: String, level: String = "DEBUG") {
+        SmartConfigRepository.logDebug(message, TAG, level)
     }
 
     private fun normalizeSsid(rawSsid: String?): String? {
