@@ -99,12 +99,28 @@ object SmartRuleManager {
         if (!isInternet) return
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
 
-        val newState = extractNetworkStateFromHandle(network, caps)
+        val extractedState = extractNetworkStateFromHandle(network, caps)
         synchronized(availableNetworks) {
             val oldState = availableNetworks[network]
-            availableNetworks[network] = newState
-            if (oldState?.ssid != newState.ssid) {
-                logDebug("[MapUpdate] NetID: $network 状态变更. 旧: ${oldState?.ssid}, 新: ${newState.ssid}")
+
+            val finalState = if (oldState != null &&
+                oldState.type == NetworkType.WIFI &&
+                !oldState.ssid.isNullOrBlank() &&
+                extractedState.type == NetworkType.WIFI &&
+                extractedState.ssid.isNullOrBlank()) {
+
+                logDebug("[MapUpdate] 忽略瞬时 SSID 丢失. 保持: ${oldState.ssid}, 忽略: ${extractedState.ssid}", level = "WARN")
+                // 继承旧的 SSID，但更新其他属性（如 IPv6 状态可能发生了变化）
+                extractedState.copy(ssid = oldState.ssid)
+            } else {
+                extractedState
+            }
+
+            availableNetworks[network] = finalState
+
+            // 仅当状态真的发生实质性变化时才打印日志，减少噪点
+            if (oldState?.ssid != finalState.ssid || oldState?.type != finalState.type) {
+                logDebug("[MapUpdate] NetID: $network 状态实质变更. 旧: ${oldState?.ssid}, 新: ${finalState.ssid}")
             }
         }
         recalculateGlobalState()
