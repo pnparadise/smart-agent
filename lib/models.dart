@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 enum RuleType {
   wifiSsid,
+  wifiGateway,
   ipv6Available,
   ipv4Available;
 
@@ -9,6 +10,8 @@ enum RuleType {
     switch (this) {
       case RuleType.wifiSsid:
         return 'WIFI_SSID';
+      case RuleType.wifiGateway:
+        return 'WIFI_GATEWAY';
       case RuleType.ipv6Available:
         return 'IPV6_AVAILABLE';
       case RuleType.ipv4Available:
@@ -17,9 +20,28 @@ enum RuleType {
   }
 
   String get label {
+    return labelZh;
+  }
+
+  String get labelZh {
+    switch (this) {
+      case RuleType.wifiSsid:
+        return 'WiFi 名称';
+      case RuleType.wifiGateway:
+        return 'WiFi 网关';
+      case RuleType.ipv6Available:
+        return 'IPv6 可用';
+      case RuleType.ipv4Available:
+        return 'IPv4 可用';
+    }
+  }
+
+  String get labelEn {
     switch (this) {
       case RuleType.wifiSsid:
         return 'WiFi SSID';
+      case RuleType.wifiGateway:
+        return 'WiFi Gateway';
       case RuleType.ipv6Available:
         return 'IPv6 Available';
       case RuleType.ipv4Available:
@@ -103,9 +125,11 @@ class InstalledApp {
 
 extension RuleTypeParser on RuleType {
   static RuleType fromNative(String value) {
-    switch (value) {
+    switch (value.toUpperCase()) {
       case 'WIFI_SSID':
         return RuleType.wifiSsid;
+      case 'WIFI_GATEWAY':
+        return RuleType.wifiGateway;
       case 'IPV6_AVAILABLE':
         return RuleType.ipv6Available;
       case 'IPV4_AVAILABLE':

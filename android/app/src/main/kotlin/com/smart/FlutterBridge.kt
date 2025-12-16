@@ -222,6 +222,9 @@ class FlutterBridge(
             "getSavedSsids" -> {
                 result.success(getSavedSsids())
             }
+            "getCurrentGatewayIp" -> {
+                result.success(SmartRuleManager.getCurrentGatewayIp())
+            }
             "getTunnelConfig" -> {
                 val file = call.argument<String>("file")
                 if (file != null) {

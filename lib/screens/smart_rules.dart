@@ -26,9 +26,16 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   // 编辑状态
   RuleType _formType = RuleType.wifiSsid;
   final TextEditingController _ssidController = TextEditingController();
+  final TextEditingController _gatewayController = TextEditingController();
   String? _formTunnel;
   String? _editingRuleId;
   bool _isAddingNew = false;
+  final List<RuleType> _orderedRuleTypes = const [
+    RuleType.wifiGateway,
+    RuleType.wifiSsid,
+    RuleType.ipv6Available,
+    RuleType.ipv4Available,
+  ];
 
   bool _loading = true;
   bool _batteryProtected = false;
@@ -55,6 +62,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   @override
   void dispose() {
     _ssidController.dispose();
+    _gatewayController.dispose();
     _scrollController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _updateSub?.cancel();
@@ -260,6 +268,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
           _editingRuleId = newRule.id;
           _formType = RuleType.wifiSsid;
           _ssidController.text = '';
+          _gatewayController.text = '';
           _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
         });
 
@@ -288,7 +297,8 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     setState(() {
       _editingRuleId = rule.id;
       _formType = rule.type;
-      _ssidController.text = rule.value ?? '';
+      _ssidController.text = rule.type == RuleType.wifiSsid ? (rule.value ?? '') : '';
+      _gatewayController.text = rule.type == RuleType.wifiGateway ? (rule.value ?? '') : '';
 
       final file = rule.tunnelFile;
       final candidate = file.isEmpty ? null : file;
@@ -315,6 +325,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
         _editingRuleId = null;
         _isAddingNew = false;
         _ssidController.clear();
+        _gatewayController.clear();
       });
     }
   }
@@ -324,6 +335,12 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       final ssid = _ssidController.text.trim();
       if (ssid.isEmpty) {
         Toast.showFailure(context, '请填写WiFi SSID');
+        return;
+      }
+    } else if (_formType == RuleType.wifiGateway) {
+      final gateway = _gatewayController.text.trim();
+      if (gateway.isEmpty) {
+        Toast.showFailure(context, '请填写网关 IPv4 地址');
         return;
       }
     }
@@ -343,7 +360,9 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     final rule = AgentRule(
       id: finalId,
       type: _formType,
-      value: _formType == RuleType.wifiSsid ? _ssidController.text.trim() : null,
+      value: _formType == RuleType.wifiSsid
+          ? _ssidController.text.trim()
+          : (_formType == RuleType.wifiGateway ? _gatewayController.text.trim() : null),
       tunnelFile: tunnelFile,
       tunnelName: tunnelName,
       enabled: true,
@@ -359,6 +378,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       _editingRuleId = null;
       _isAddingNew = false;
       _ssidController.clear();
+      _gatewayController.clear();
     });
     _saveAgentRuleConfig();
   }
@@ -774,7 +794,11 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                   child: Icon(
                     isTemp
                         ? Icons.playlist_add
-                        : (rule.type == RuleType.wifiSsid ? Icons.wifi : Icons.public),
+                        : (rule.type == RuleType.wifiSsid
+                            ? Icons.wifi
+                            : rule.type == RuleType.wifiGateway
+                                ? Icons.router
+                                : Icons.public),
                     color: isEditing ? AppTheme.vultrBlue : AppTheme.textSecondary,
                     size: 24,
                   ),
@@ -782,7 +806,11 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                 title: Text(
                   isTemp
                       ? 'Add Tunnel Rule'
-                      : (rule.type == RuleType.wifiSsid ? (rule.value?.isEmpty ?? true ? '配置 WiFi' : 'WiFi: ${rule.value}') : rule.type.label),
+                      : (rule.type == RuleType.wifiSsid
+                          ? (rule.value?.isEmpty ?? true ? '配置 WiFi' : 'WiFi: ${rule.value}')
+                          : rule.type == RuleType.wifiGateway
+                              ? (rule.value?.isEmpty ?? true ? '配置 WiFi' : 'WiFi: ${rule.value}')
+                              : rule.type.label),
                   style: GoogleFonts.inter(
                     fontWeight: FontWeight.w700,
                     fontSize: 15,
@@ -870,14 +898,31 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                               value: _formType,
                               isExpanded: true,
                               isDense: true,
-                              decoration: InputDecoration(
-                                labelText: '条件类型',
-                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                          decoration: InputDecoration(
+                            labelText: '条件类型',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                          ),
+                          selectedItemBuilder: (ctx) {
+                            return _orderedRuleTypes
+                                .map((t) => Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: Text(
+                                        t.labelZh,
+                                        softWrap: false,
+                                      ),
+                                    ))
+                                .toList();
+                          },
+                          items: _orderedRuleTypes.map((t) {
+                            return DropdownMenuItem(
+                              value: t,
+                              child: Text(
+                                t.labelEn,
+                                softWrap: false,
                               ),
-                              items: RuleType.values.map((t) {
-                                return DropdownMenuItem(value: t, child: Text(t.label));
-                              }).toList(),
+                            );
+                          }).toList(),
                               onChanged: (val) {
                                 if (val != null) setState(() => _formType = val);
                               },
@@ -959,6 +1004,50 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
                                   _ssidController.text = selected;
                                 }
                               },
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          '由于SSID的获取权限受到严格限制，容易导致规则失效，强烈建议使用WiFi网关替代',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ] else if (_formType == RuleType.wifiGateway) ...[
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _gatewayController,
+                                decoration: InputDecoration(
+                                  labelText: '网关 IPv4 地址',
+                                  hintText: '如 192.168.1.1',
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                ),
+                                keyboardType: TextInputType.number,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              style: IconButton.styleFrom(
+                                backgroundColor: AppTheme.background,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                              icon: const Icon(Icons.wifi_tethering, color: AppTheme.textSecondary),
+                              onPressed: () async {
+                                final gateway = await SmartAgentApi.getCurrentGatewayIp();
+                                if (!mounted) return;
+                                if (gateway == null || gateway.isEmpty) {
+                                  Toast.showText(context, '请确保开启WiFi并接入IPv4网络');
+                                  return;
+                                }
+                                _gatewayController.text = gateway;
+                              },
+                              tooltip: '读取当前网关',
                             ),
                           ],
                         ),

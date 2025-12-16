@@ -104,7 +104,7 @@ class _LogPageBodyState extends State<_LogPageBody> {
   Widget _buildLogItem(LogEntry log) {
     String type = "";
     String content = log.message;
-    String? ssid;
+    String? extra;
     String? error;
     String? descPrefix;
     
@@ -115,7 +115,7 @@ class _LogPageBodyState extends State<_LogPageBody> {
           type = map['type']?.toString() ?? "";
           final from = map['from']?.toString() ?? "";
           final to = map['to']?.toString() ?? "";
-          ssid = map['ssid']?.toString();
+          extra = (map['extra'] ?? map['ssid'])?.toString();
           error = map['error']?.toString();
           descPrefix = map['descPrefix']?.toString();
           
@@ -187,10 +187,10 @@ class _LogPageBodyState extends State<_LogPageBody> {
                       style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: AppTheme.textPrimary),
                     ),
                   ),
-                  if (ssid != null) ...[
+                  if (extra != null) ...[
                     const SizedBox(width: 8),
                     Text(
-                      ssid,
+                      extra!,
                       style: GoogleFonts.inter(color: AppTheme.textSecondary, fontSize: 12),
                     ),
                   ],

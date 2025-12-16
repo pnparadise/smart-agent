@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 
 enum class RuleType {
     WIFI_SSID,
+    WIFI_GATEWAY,
     IPV6_AVAILABLE,
     IPV4_AVAILABLE
 }
@@ -12,7 +13,7 @@ enum class RuleType {
 data class AgentRule(
     val id: String,
     val type: RuleType,
-    val value: String?, // SSID for WIFI, null for others
+    val value: String?, // SSID for WIFI_SSID, IPv4 gateway for WIFI_GATEWAY, null for others
     val tunnelFile: String, // Tunnel config filename
     val tunnelName: String, // Human readable name
     val enabled: Boolean = true

@@ -66,6 +66,10 @@ class SmartAgentApi {
     return result.map((e) => e.toString()).toList();
   }
 
+  static Future<String?> getCurrentGatewayIp() async {
+    return await _channel.invokeMethod<String>('getCurrentGatewayIp');
+  }
+
   static Future<bool> requestLocationPermission() async {
     final granted = await _channel.invokeMethod<bool>('requestLocationPermission');
     return granted ?? false;

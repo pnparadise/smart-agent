@@ -5,12 +5,15 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.LinkProperties
 import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import kotlinx.coroutines.*
 import com.smart.component.SmartToast
+import android.net.RouteInfo
+import java.net.Inet4Address
 import java.net.Inet6Address
 
 object SmartRuleManager {
@@ -50,9 +53,9 @@ object SmartRuleManager {
         val ignoredTunnels: Set<String> = emptySet()
     ) {
         // 环境指纹：用于判断是否切换了网络环境
-        // 只有当 Type 或 SSID 改变时，才视为环境改变，从而清空黑名单
+        // 只有当 Type、SSID 或网关改变时，才视为环境改变，从而清空黑名单
         val envFingerprint: String
-            get() = "${network?.type?.name ?: "NONE"}_${network?.ssid ?: ""}"
+            get() = "${network?.type?.name ?: "NONE"}_${network?.ssid ?: ""}_${network?.gatewayIp ?: ""}"
     }
 
     // 单一状态源，所有修改必须同步
@@ -65,10 +68,11 @@ object SmartRuleManager {
     data class NetworkState(
         val type: NetworkType,
         val ssid: String? = null,
-        val hasIpv6: Boolean = false
+        val hasIpv6: Boolean = false,
+        val gatewayIp: String? = null
     ) {
         override fun toString(): String {
-            return "[Type: $type, SSID: ${ssid ?: "NULL"}, IPv6: $hasIpv6]"
+            return "[Type: $type, SSID: ${ssid ?: "NULL"}, IPv6: $hasIpv6, Gateway: ${gatewayIp ?: "NULL"}]"
         }
     }
 
@@ -420,7 +424,28 @@ object SmartRuleManager {
             when (rule.type) {
                 RuleType.WIFI_SSID -> {
                     val match = (netState.type == NetworkType.WIFI) && netState.ssid == rule.value
-                    if (match) logDebug("   -> 匹配成功: SSID=${rule.value}")
+                    if (match) logDebug("匹配成功: SSID=${rule.value}")
+                    match
+                }
+                RuleType.WIFI_GATEWAY -> {
+                    if (netState.type != NetworkType.WIFI) {
+                        logDebug("跳过网关规则(${rule.value}): 当前非 WiFi")
+                        return@filter false
+                    }
+
+                    val currentGateway = netState.gatewayIp
+                    if (currentGateway.isNullOrBlank()) {
+                        logDebug("跳过网关规则(${rule.value}): 未获取到当前网关")
+                        return@filter false
+                    }
+
+                    val match = (netState.type == NetworkType.WIFI) &&
+                            currentGateway == rule.value
+                    if (match) {
+                        logDebug("匹配成功: Gateway=${rule.value}")
+                    } else {
+                        logDebug("未匹配: 当前网关=$currentGateway, 规则=${rule.value}")
+                    }
                     match
                 }
                 RuleType.IPV6_AVAILABLE -> netState.hasIpv6
@@ -479,8 +504,13 @@ object SmartRuleManager {
             else -> eventSource
         }
 
+        val logSsidOrGateway = when {
+            validRule?.type == RuleType.WIFI_GATEWAY -> netState.gatewayIp
+            else -> netState.ssid
+        }
+
         SmartConfigRepository.logEvent(
-            finalLogType, currentTunnel, targetTunnelName, netState.ssid, descPrefix = actionDesc
+            finalLogType, currentTunnel, targetTunnelName, logSsidOrGateway, descPrefix = actionDesc
         )
     }
 
@@ -525,6 +555,7 @@ object SmartRuleManager {
         if (old.ssid != new.ssid) return false
         // LinkProperties 变动频繁，如果其他都一样，忽略 IPv6 的细微抖动
         if (old.hasIpv6 != new.hasIpv6) return false
+        if (old.gatewayIp != new.gatewayIp) return false
         return true
     }
 
@@ -617,7 +648,9 @@ object SmartRuleManager {
             it.address is Inet6Address && !it.address.isLinkLocalAddress
         } == true
 
-        return NetworkState(type, ssid, hasIpv6)
+        val gatewayIp = linkProps?.let { resolveGatewayIp(it) }
+
+        return NetworkState(type, ssid, hasIpv6, gatewayIp)
     }
 
     private fun getCurrentNetworkState(): NetworkState {
@@ -627,6 +660,17 @@ object SmartRuleManager {
         val state = extractNetworkStateFromHandle(activeNetwork, caps)
         logDebug("[ActiveState] $state", level = "VERBOSE")
         return state
+    }
+
+    fun getCurrentGatewayIp(): String? {
+        return runCatching {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val activeNetwork = cm.activeNetwork ?: return null
+            val caps = cm.getNetworkCapabilities(activeNetwork) ?: return null
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return null
+            val linkProps = cm.getLinkProperties(activeNetwork) ?: return null
+            resolveGatewayIp(linkProps)
+        }.getOrNull()
     }
 
     private fun getSsidFromWifiManagerFallback(): String? {
@@ -640,6 +684,19 @@ object SmartRuleManager {
             logDebug("WifiManager Fallback Error: ${e.message}", level = "ERROR")
             null
         }
+    }
+
+    private fun resolveGatewayIp(linkProperties: LinkProperties): String? {
+        // 仅返回默认路由的 IPv4 网关地址
+        for (route: RouteInfo in linkProperties.routes) {
+            if (route.isDefaultRoute && route.hasGateway()) {
+                val gateway = route.gateway
+                if (gateway is Inet4Address) {
+                    return gateway.hostAddress
+                }
+            }
+        }
+        return null
     }
 
     private fun logDebug(message: String, level: String = "DEBUG") {

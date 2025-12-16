@@ -213,7 +213,7 @@ object SmartConfigRepository {
         type: EventType,
         from: String,
         to: String,
-        ssid: String? = null,
+        extra: String? = null,
         error: String? = null,
         descPrefix: String? = null
     ) {
@@ -226,7 +226,7 @@ object SmartConfigRepository {
             "from" to from,
             "to" to to
         )
-        if (ssid != null) map["ssid"] = ssid
+        if (extra != null) map["extra"] = extra
         if (error != null) map["error"] = error
         if (descPrefix != null) map["descPrefix"] = descPrefix
         val msg = json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), kotlinx.serialization.json.JsonObject(map.mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) }))
