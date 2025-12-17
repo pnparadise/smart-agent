@@ -3,16 +3,16 @@ package com.smart
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.LinkProperties
 import android.net.NetworkRequest
+import android.net.RouteInfo
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
-import kotlinx.coroutines.*
 import com.smart.component.SmartToast
-import android.net.RouteInfo
+import kotlinx.coroutines.*
 import java.net.Inet4Address
 import java.net.Inet6Address
 
@@ -31,6 +31,18 @@ object SmartRuleManager {
 
     // 记录当前所有可用的物理网络及其状态，用于仲裁最佳网络
     private val availableNetworks = mutableMapOf<Network, NetworkState>()
+
+    // --- 优化策略 1: 规则需求快照 ---
+    // 用于标记当前生效的规则集是否需要特定的硬件信息。
+    // 如果为 false，相关的数据获取逻辑（如 IPC 调用、遍历）将被跳过，极大地节省资源。
+    private data class RuleRequirements(
+        val needsSsid: Boolean = false,    // 是否配置了 SSID 规则
+        val needsGateway: Boolean = false, // 是否配置了 网关 规则
+        val needsIpv6: Boolean = false     // 是否配置了 IPv6 规则
+    )
+
+    @Volatile
+    private var activeRequirements = RuleRequirements()
 
     // --- 核心状态管理 ---
 
@@ -53,7 +65,6 @@ object SmartRuleManager {
         val ignoredTunnels: Set<String> = emptySet()
     ) {
         // 环境指纹：用于判断是否切换了网络环境
-        // 只有当 Type、SSID 或网关改变时，才视为环境改变，从而清空黑名单
         val envFingerprint: String
             get() = "${network?.type?.name ?: "NONE"}_${network?.ssid ?: ""}_${network?.gatewayIp ?: ""}"
     }
@@ -69,7 +80,11 @@ object SmartRuleManager {
         val type: NetworkType,
         val ssid: String? = null,
         val hasIpv6: Boolean = false,
-        val gatewayIp: String? = null
+        val gatewayIp: String? = null,
+
+        // --- 优化策略 2: 能力指纹 ---
+        // 用于在回调入口处快速比对，过滤掉信号强度、链路带宽波动等无意义回调
+        val capsFingerprint: String = ""
     ) {
         override fun toString(): String {
             return "[Type: $type, SSID: ${ssid ?: "NULL"}, IPv6: $hasIpv6, Gateway: ${gatewayIp ?: "NULL"}]"
@@ -95,38 +110,62 @@ object SmartRuleManager {
         }
     }
 
+    // --- 网络回调处理 (核心优化区) ---
+
     private fun handleCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
         val isInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        logDebug("[Callback] NetID: $network, Internet: $isInternet, Validated: $isValidated", level = "VERBOSE")
-
+        // 过滤 VPN 网络，只关注物理底层网络
         if (!isInternet) return
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
 
-        val extractedState = extractNetworkStateFromHandle(network, caps)
-        synchronized(availableNetworks) {
+        val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+
+        // [降噪逻辑] 计算轻量级指纹
+        // Android 系统会因为链路带宽(LinkDownstreamBandwidthKbps)微小变化频繁回调此方法。
+        // 我们只关心：1. 联网能力 2. 验证状态 3. TransportInfo 对象引用(Android Q+ SSID 变化会导致此对象哈希变化)
+        val transportInfoHash = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            caps.transportInfo?.hashCode() ?: 0
+        } else 0
+
+        val currentFingerprint = "$isValidated|$transportInfoHash"
+
+        val extractedState = synchronized(availableNetworks) {
             val oldState = availableNetworks[network]
 
+            // 如果已有记录，且核心指纹没变，说明是信号强弱等噪音，直接 return，不执行耗时解析
+            if (oldState != null && oldState.capsFingerprint == currentFingerprint) {
+                // 特例：如果之前需要 SSID 但没拿到 (ssid=null)，且现在指纹没变，
+                // 我们依然不应该在这里重试，而是交给 recalculateGlobalState 的防抖逻辑去处理，避免死循环
+                return
+            }
+
+            // 指纹变了，执行解析 (注意：extractNetworkStateFromHandle 内部也进行了按需优化)
+            val newStateRaw = extractNetworkStateFromHandle(network, caps)
+            val newState = newStateRaw.copy(capsFingerprint = currentFingerprint)
+
+            // 状态合并逻辑：如果新状态 SSID 丢失但旧状态有，则继承旧 SSID (防止瞬时丢失)
             val finalState = if (oldState != null &&
                 oldState.type == NetworkType.WIFI &&
                 !oldState.ssid.isNullOrBlank() &&
-                extractedState.type == NetworkType.WIFI &&
-                extractedState.ssid.isNullOrBlank()) {
+                newState.type == NetworkType.WIFI &&
+                newState.ssid.isNullOrBlank()) {
 
-                logDebug("[MapUpdate] 忽略瞬时 SSID 丢失. 保持: ${oldState.ssid}, 忽略: ${extractedState.ssid}", level = "WARN")
-                // 继承旧的 SSID，但更新其他属性（如 IPv6 状态可能发生了变化）
-                extractedState.copy(ssid = oldState.ssid)
+                logDebug("[MapUpdate] 忽略瞬时 SSID 丢失. 保持: ${oldState.ssid}", level = "WARN")
+                newState.copy(ssid = oldState.ssid)
             } else {
-                extractedState
+                newState
             }
 
             availableNetworks[network] = finalState
 
-            // 仅当状态真的发生实质性变化时才打印日志，减少噪点
+            // 仅当业务属性发生实质变化时才打印日志
             if (oldState?.ssid != finalState.ssid || oldState?.type != finalState.type) {
-                logDebug("[MapUpdate] NetID: $network 状态实质变更. 旧: ${oldState?.ssid}, 新: ${finalState.ssid}")
+                logDebug("[NetChange] NetID: $network 状态实质变更. 新SSID: ${finalState.ssid}")
             }
+
+            finalState // 返回给外部以便可能的后续处理，虽然这里主要靠 Map 更新
         }
+
         recalculateGlobalState()
     }
 
@@ -141,30 +180,36 @@ object SmartRuleManager {
         }
     }
 
-    // 重新计算全局网络状态（防抖）
+    // 重新计算全局网络状态（防抖 + 延迟 Fallback）
     private fun recalculateGlobalState() {
         networkEvaluationJob?.cancel()
         networkEvaluationJob = scope.launch {
-            // [排查点 4]：开始防抖
+            // [排查点]：防抖 300ms
+            // 这意味着如果网络在短时间内剧烈波动，我们只会在稳定后执行一次昂贵的检查
             delay(300)
-            var bestState = resolveBestNetwork()
 
-            // 【关键排查逻辑：迟到的 SSID】
-            if (bestState.type == NetworkType.WIFI && bestState.ssid == null) {
-                logDebug("[LateCheck] 发现 WiFi 已连接但 SSID 缺失，尝试强制补救读取...", level = "WARN")
+            var bestState = resolveBestNetwork()
+            val req = activeRequirements // 获取当前规则需求快照
+
+            // [关键优化]：延迟且受限的 WifiManager Fallback
+            // 只有同时满足以下条件才调用 WifiManager (IPC 耗电操作)：
+            // 1. 当前判定为 WiFi 网络
+            // 2. 常规方法未能获取到 SSID (bestState.ssid == null)
+            // 3. 用户确实配置了需要 SSID 的规则 (req.needsSsid == true)
+            if (bestState.type == NetworkType.WIFI && bestState.ssid == null && req.needsSsid) {
+                logDebug("[LateCheck] 规则需要SSID但缺失，尝试强制补救读取...", level = "WARN")
                 val rawFallback = getSsidFromWifiManagerFallback()
                 val lateSsid = normalizeSsid(rawFallback)
                 if (lateSsid != null) {
                     logDebug("[LateCheck] 补救成功！获取到 SSID: $lateSsid", level = "INFO")
                     bestState = bestState.copy(ssid = lateSsid)
-                } else {
-                    logDebug("[LateCheck] 补救失败。WifiManager 返回 raw: ${rawFallback ?: "NULL"}", level = "ERROR")
                 }
             }
 
             val event = if (bestState.type == NetworkType.NONE)
                 SmartConfigRepository.EventType.NETWORK_LOST
             else SmartConfigRepository.EventType.NETWORK_AVAILABLE
+
             evaluateChange(event, bestState)
         }
     }
@@ -172,9 +217,11 @@ object SmartRuleManager {
     private fun handleNetworkLost(network: Network) {
         logDebug("[Callback] Network Lost: $network")
         synchronized(availableNetworks) {
-            availableNetworks.remove(network)
+            if (availableNetworks.remove(network) != null) {
+                // 只有真的移除了才触发重算
+                recalculateGlobalState()
+            }
         }
-        recalculateGlobalState()
     }
 
     fun onAgentRuleUpdated(
@@ -182,6 +229,18 @@ object SmartRuleManager {
         config: AgentRuleConfig = SmartConfigRepository.agentRuleConfig.value
     ) {
         synchronized(this) {
+            // --- 优化策略: 更新规则需求 ---
+            if (config.enabled) {
+                val needsSsid = config.rules.any { it.enabled && it.type == RuleType.WIFI_SSID }
+                val needsGateway = config.rules.any { it.enabled && it.type == RuleType.WIFI_GATEWAY }
+                val needsIpv6 = config.rules.any { it.enabled && it.type == RuleType.IPV6_AVAILABLE }
+
+                activeRequirements = RuleRequirements(needsSsid, needsGateway, needsIpv6)
+                logDebug("规则需求更新: $activeRequirements", level = "INFO")
+            } else {
+                activeRequirements = RuleRequirements() // 全部为 false
+            }
+
             val oldEnabled = state.configEnabled
 
             if (config.enabled) {
@@ -206,7 +265,7 @@ object SmartRuleManager {
                     }
                 }
             } else {
-                // 情况3: 关闭 -> 停止监听，保留 false 状态，清空其他
+                // 情况3: 关闭 -> 停止监听
                 stopMonitoring()
                 state = RuntimeState(configEnabled = false)
             }
@@ -226,25 +285,18 @@ object SmartRuleManager {
                 SmartConfigRepository.EventType.APP_RULE_CHANGED,
                 tunnelName, tunnelName, descPrefix = "重启隧道"
             )
-
-            // startTunnelService 会自动更新 pendingTargetFile
             startTunnelService(tunnelFile)
         }
     }
 
     // --- 核心业务：错误处理与 Fallback ---
 
-    /**
-     * 隧道启动失败回调
-     */
     fun onTunnelStartFailed(failedFile: String, errorMsg: String) {
         scope.launch {
             // 1. 原子检查与状态更新
-            // 返回 true 表示这确实是当前任务的失败，需要处理；返回 false 表示是过期消息
             val shouldTriggerFallback = synchronized(this@SmartRuleManager) {
                 // 关键校验：如果当前意图已经变了，说明用户可能手动切了网络或关了开关，旧的错误应忽略
                 if (state.pendingTargetFile != failedFile) {
-                    logDebug("静默忽略过期错误: $failedFile, 当前意图: ${state.pendingTargetFile}")
                     return@synchronized false
                 }
 
@@ -272,7 +324,6 @@ object SmartRuleManager {
             }
 
             // 3. 触发重新评估 (Fallback)
-            // 评估函数读取 state.ignoredTunnels 后，会自动跳过该文件
             enqueueEvaluation(SmartConfigRepository.EventType.TUNNEL_ERROR)
         }
     }
@@ -313,28 +364,12 @@ object SmartRuleManager {
     // --- 网络监听逻辑 ---
 
     private val networkCallback: ConnectivityManager.NetworkCallback =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            object : ConnectivityManager.NetworkCallback(ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
-                init {
-                    logDebug("NetworkCallback initialized with FLAG_INCLUDE_LOCATION_INFO (S+)")
-                }
+        object : ConnectivityManager.NetworkCallback() {
+            // 注意：API S+ 建议添加 FLAG_INCLUDE_LOCATION_INFO，但逻辑通用
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
+                handleCapabilitiesChanged(network, caps)
 
-                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
-                    handleCapabilitiesChanged(network, caps)
-
-                override fun onLost(network: Network) = handleNetworkLost(network)
-            }
-        } else {
-            object : ConnectivityManager.NetworkCallback() {
-                init {
-                    logDebug("NetworkCallback initialized without location flag (pre-S)")
-                }
-
-                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
-                    handleCapabilitiesChanged(network, caps)
-
-                override fun onLost(network: Network) = handleNetworkLost(network)
-            }
+            override fun onLost(network: Network) = handleNetworkLost(network)
         }
 
     // --- 核心评估逻辑 ---
@@ -351,9 +386,8 @@ object SmartRuleManager {
         synchronized(this) {
             val oldState = state
 
-            // 再次 Check 防止乱序
+            // 逻辑状态对比：如果规则不关心 IPv6，则忽略 IPv6 的差异
             if (isSameLogicalState(oldState.network, currentState)) {
-                logDebug("[Evaluate] 状态未变，忽略. Old: ${oldState.network}, New: $currentState", level = "VERBOSE")
                 return
             }
 
@@ -363,13 +397,10 @@ object SmartRuleManager {
             var newState = oldState.copy(network = currentState)
             val newFingerprint = newState.envFingerprint
 
-            // 策略：只有当网络真正连上，且指纹发生变化时，才重置黑名单
-            // 如果只是断网 (NONE)，我们暂时保留黑名单，防止网络闪断导致重试循环
+            // 只有当网络真正连上，且环境指纹发生变化时，才重置黑名单
             if (currentState.type != NetworkType.NONE && oldFingerprint != newFingerprint) {
                 logDebug("环境变更 ($oldFingerprint -> $newFingerprint)，重置失败记录", level = "INFO")
                 newState = newState.copy(ignoredTunnels = emptySet())
-            } else {
-                logDebug("[Evaluate] 状态更新: $currentState (指纹未变/断网)")
             }
 
             state = newState
@@ -396,14 +427,9 @@ object SmartRuleManager {
         val config = SmartConfigRepository.agentRuleConfig.value
         if (!config.enabled) return
 
-        // 【关键】获取当前状态快照，后续逻辑全部基于此快照，保证一致性
         val snapshot = synchronized(this) { state }
-
-        // 优先使用传入的预计算状态，否则使用快照中的，最后兜底查询
         val netState = preCalculatedState ?: snapshot.network ?: getCurrentNetworkState()
         val isConnected = netState.type != NetworkType.NONE
-
-        logDebug("[RuleCheck] 开始匹配规则. Event: $eventSource, NetState: $netState")
 
         // 1. 处理完全断网
         if (!isConnected) {
@@ -423,29 +449,17 @@ object SmartRuleManager {
             if (!rule.enabled) return@filter false
             when (rule.type) {
                 RuleType.WIFI_SSID -> {
+                    // 如果因为按需加载导致 ssid 为 null，这里自然匹配失败，符合预期
                     val match = (netState.type == NetworkType.WIFI) && netState.ssid == rule.value
                     if (match) logDebug("匹配成功: SSID=${rule.value}")
                     match
                 }
                 RuleType.WIFI_GATEWAY -> {
-                    if (netState.type != NetworkType.WIFI) {
-                        logDebug("跳过网关规则(${rule.value}): 当前非 WiFi")
-                        return@filter false
-                    }
-
+                    if (netState.type != NetworkType.WIFI) return@filter false
                     val currentGateway = netState.gatewayIp
-                    if (currentGateway.isNullOrBlank()) {
-                        logDebug("跳过网关规则(${rule.value}): 未获取到当前网关")
-                        return@filter false
-                    }
-
-                    val match = (netState.type == NetworkType.WIFI) &&
-                            currentGateway == rule.value
-                    if (match) {
-                        logDebug("匹配成功: Gateway=${rule.value}")
-                    } else {
-                        logDebug("未匹配: 当前网关=$currentGateway, 规则=${rule.value}")
-                    }
+                    if (currentGateway.isNullOrBlank()) return@filter false
+                    val match = currentGateway == rule.value
+                    if (match) logDebug("匹配成功: Gateway=${rule.value}")
                     match
                 }
                 RuleType.IPV6_AVAILABLE -> netState.hasIpv6
@@ -456,7 +470,6 @@ object SmartRuleManager {
         // 3. 寻找有效规则 (Fallback 核心：过滤掉在快照黑名单中的文件)
         val validRule = matchedRules.firstOrNull { rule ->
             val file = rule.tunnelFile
-            // 允许直连(file为空)通过；或者该文件不在忽略列表中
             file.isNullOrBlank() || !snapshot.ignoredTunnels.contains(file)
         }
 
@@ -477,7 +490,6 @@ object SmartRuleManager {
                 (targetTunnelFile != null && vpnState.tunnelFile != targetTunnelFile)
 
         if (!needSwitch) {
-            // 如果触发了 Fallback 流程，但最终计算结果是直连，且当前已经是直连，记录日志
             if (isFallbackTriggered && targetTunnelName == "直连" && currentTunnel == "直连") {
                 SmartConfigRepository.logEvent(
                     SmartConfigRepository.EventType.FALLBACK, "Unknown", "直连", netState.ssid, descPrefix = "回退直连"
@@ -517,12 +529,9 @@ object SmartRuleManager {
     // --- Intent Helpers ---
 
     private fun startTunnelService(tunnelFile: String) {
-        // 更新意图状态
         synchronized(this) {
             state = state.copy(pendingTargetFile = tunnelFile)
         }
-
-        logDebug("startTunnelService -> $tunnelFile", level = "INFO")
         val intent = Intent(context, SmartAgent::class.java).apply {
             action = SmartAgent.ACTION_START_TUNNEL
             putExtra(SmartAgent.EXTRA_TUNNEL_FILE, tunnelFile)
@@ -535,12 +544,9 @@ object SmartRuleManager {
     }
 
     private fun stopTunnelService() {
-        // 清除意图状态
         synchronized(this) {
             state = state.copy(pendingTargetFile = null)
         }
-
-        logDebug("stopTunnelService invoked", level = "INFO")
         val intent = Intent(context, SmartAgent::class.java).apply {
             action = SmartAgent.ACTION_STOP_TUNNEL
         }
@@ -553,9 +559,9 @@ object SmartRuleManager {
         if (old == null || new == null) return old == new
         if (old.type != new.type) return false
         if (old.ssid != new.ssid) return false
-        // LinkProperties 变动频繁，如果其他都一样，忽略 IPv6 的细微抖动
-        if (old.hasIpv6 != new.hasIpv6) return false
         if (old.gatewayIp != new.gatewayIp) return false
+        // 优化：只有在规则确实需要 IPv6 时，才认为 IPv6 的抖动是实质性变化
+        if (activeRequirements.needsIpv6 && old.hasIpv6 != new.hasIpv6) return false
         return true
     }
 
@@ -587,10 +593,11 @@ object SmartRuleManager {
     }
 
     /**
-     * 根据特定的 Network 句柄提取网络状态
+     * 从 Network 句柄提取网络状态 (按需调用)
      */
     private fun extractNetworkStateFromHandle(network: Network, caps: NetworkCapabilities): NetworkState {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        // 获取当前规则需求快照
+        val req = activeRequirements
 
         val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
         val isMobile = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
@@ -604,51 +611,42 @@ object SmartRuleManager {
         if (type == NetworkType.NONE) return NetworkState(NetworkType.NONE)
 
         var ssid: String? = null
-        if (isWifi) {
-            val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+
+        // --- 优化策略: 按需获取 SSID ---
+        // 只有是 WiFi 且规则需要 SSID 时才尝试获取
+        if (isWifi && req.needsSsid) {
             var rawSsid: String? = null
-            var source = "None"
+
+            // 1. 优先尝试轻量级 TransportInfo (无 IPC 阻塞)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val info = caps.transportInfo
                 if (info is WifiInfo) {
                     rawSsid = info.ssid
                 }
-                source = "TransportInfo(Q+)"
-            } else {
-                // 兼容旧版：TransportInfo 不包含 SSID，返回 null
-                rawSsid = null
-                source = "TransportInfo(pre-Q)"
             }
 
-            // 优先使用 transportInfo 的值，并经过 normalize 过滤 "<unknown ssid>"
-            val normalizedRaw = normalizeSsid(rawSsid)
-            if (normalizedRaw == null) {
-                // 尝试使用 WifiManager 作为兜底（在部分设备上 transportInfo 可能拿不到）
-                val fallbackRaw = getSsidFromWifiManagerFallback()
-                ssid = normalizeSsid(fallbackRaw)
-                source = "WifiManagerFallback(Raw: ${fallbackRaw ?: "null"})"
-            } else {
-                ssid = normalizedRaw
-            }
-
-            if (ssid == null && isValidated) {
-                logDebug("警告：网络已验证 (Validated) 但仍无法获取 SSID。请检查位置权限！")
-            } else if (isValidated) {
-                logDebug("网络已验证 (Validated)，确认获取到 SSID: ${ssid ?: "null"}")
-            } else {
-                logDebug("SSID resolved after normalize: ${ssid ?: "null"}")
-            }
-
-            logDebug("[Extract] SSID提取结果: ${ssid ?: "null"}. 来源: $source. Validated: ${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}")
+            ssid = normalizeSsid(rawSsid)
+            // 注意：此处不进行 WifiManager Fallback，将其移至 recalculateGlobalState 以减少调用
         }
 
-        // 提取 IPv6
-        val linkProps = cm.getLinkProperties(network)
-        val hasIpv6 = linkProps?.linkAddresses?.any {
-            it.address is Inet6Address && !it.address.isLinkLocalAddress
-        } == true
+        // --- 优化策略: 按需遍历 LinkProperties ---
+        var hasIpv6 = false
+        var gatewayIp: String? = null
 
-        val gatewayIp = linkProps?.let { resolveGatewayIp(it) }
+        if (req.needsIpv6 || req.needsGateway) {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val linkProps = cm.getLinkProperties(network)
+
+            if (req.needsIpv6) {
+                hasIpv6 = linkProps?.linkAddresses?.any {
+                    it.address is Inet6Address && !it.address.isLinkLocalAddress
+                } == true
+            }
+
+            if (req.needsGateway && isWifi) {
+                gatewayIp = linkProps?.let { resolveGatewayIp(it) }
+            }
+        }
 
         return NetworkState(type, ssid, hasIpv6, gatewayIp)
     }
@@ -658,7 +656,6 @@ object SmartRuleManager {
         val activeNetwork = cm.activeNetwork ?: return NetworkState(NetworkType.NONE)
         val caps = cm.getNetworkCapabilities(activeNetwork) ?: return NetworkState(NetworkType.NONE)
         val state = extractNetworkStateFromHandle(activeNetwork, caps)
-        logDebug("[ActiveState] $state", level = "VERBOSE")
         return state
     }
 
@@ -676,10 +673,9 @@ object SmartRuleManager {
     private fun getSsidFromWifiManagerFallback(): String? {
         return try {
             val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            // 这是一个重量级调用
             val info = wm.connectionInfo ?: return null
-            val ssid = info.ssid
-            logDebug("WifiManager fallback SSID: ${ssid ?: "null"}", level = "VERBOSE")
-            ssid
+            info.ssid
         } catch (e: Exception) {
             logDebug("WifiManager Fallback Error: ${e.message}", level = "ERROR")
             null
@@ -687,7 +683,6 @@ object SmartRuleManager {
     }
 
     private fun resolveGatewayIp(linkProperties: LinkProperties): String? {
-        // 仅返回默认路由的 IPv4 网关地址
         for (route: RouteInfo in linkProperties.routes) {
             if (route.isDefaultRoute && route.hasGateway()) {
                 val gateway = route.gateway
