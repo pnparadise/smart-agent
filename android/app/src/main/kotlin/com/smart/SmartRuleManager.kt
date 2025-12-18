@@ -532,9 +532,9 @@ object SmartRuleManager {
         synchronized(this) {
             state = state.copy(pendingTargetFile = tunnelFile)
         }
-        val intent = Intent(context, SmartAgent::class.java).apply {
-            action = SmartAgent.ACTION_START_TUNNEL
-            putExtra(SmartAgent.EXTRA_TUNNEL_FILE, tunnelFile)
+        val intent = Intent(context, SmartAgentVpnService::class.java).apply {
+            action = SmartAgentVpnService.ACTION_START_TUNNEL
+            putExtra(SmartAgentVpnService.EXTRA_TUNNEL_FILE, tunnelFile)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent)
@@ -547,8 +547,8 @@ object SmartRuleManager {
         synchronized(this) {
             state = state.copy(pendingTargetFile = null)
         }
-        val intent = Intent(context, SmartAgent::class.java).apply {
-            action = SmartAgent.ACTION_STOP_TUNNEL
+        val intent = Intent(context, SmartAgentVpnService::class.java).apply {
+            action = SmartAgentVpnService.ACTION_STOP_TUNNEL
         }
         context.startService(intent)
     }

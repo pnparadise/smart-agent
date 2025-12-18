@@ -31,3 +31,9 @@ data class AppRuleConfig(
     val selectedApps: List<String> = emptyList(),
     val version: Int = 0
 )
+
+@Serializable
+data class DohConfig(
+    val enabled: Boolean = false,
+    val dohUrl: String = ""
+)

@@ -19,6 +19,8 @@ object SmartConfigRepository {
     val agentRuleConfig: StateFlow<AgentRuleConfig> = _agentRuleConfig.asStateFlow()
     private val _appRuleConfig = MutableStateFlow(AppRuleConfig())
     val appRuleConfig: StateFlow<AppRuleConfig> = _appRuleConfig.asStateFlow()
+    private val _dohConfig = MutableStateFlow(DohConfig())
+    val dohConfig: StateFlow<DohConfig> = _dohConfig.asStateFlow()
 
     private fun saveAgentConfig() {
         runCatching { db.saveAgentConfig(_agentRuleConfig.value, json) }.onFailure { it.printStackTrace() }
@@ -26,6 +28,10 @@ object SmartConfigRepository {
 
     private fun saveAppRuleConfig() {
         runCatching { db.saveAppRuleConfig(_appRuleConfig.value, json) }.onFailure { it.printStackTrace() }
+    }
+
+    private fun saveDohConfig() {
+        runCatching { db.saveDohConfig(_dohConfig.value) }.onFailure { it.printStackTrace() }
     }
 
     private fun notifyRuleChange(eventType: EventType? = EventType.RULE_UPDATED, config: AgentRuleConfig = _agentRuleConfig.value) {
@@ -40,9 +46,12 @@ object SmartConfigRepository {
     }
 
     private fun load() {
-        val (agent, appRule) = runCatching { db.load(json) }.getOrDefault(AgentRuleConfig() to AppRuleConfig())
+        val (agent, appRule, doh) = runCatching { db.load(json) }.getOrDefault(
+            Triple(AgentRuleConfig(), AppRuleConfig(), DohConfig())
+        )
         _agentRuleConfig.value = agent
         _appRuleConfig.value = appRule
+        _dohConfig.value = doh
     }
 
     fun registerTunnel(name: String, file: String, content: String) {
@@ -207,6 +216,13 @@ object SmartConfigRepository {
         _appRuleConfig.value = newConfig
         saveAppRuleConfig()
         SmartRuleManager.onAppRuleUpdated(newConfig)
+    }
+
+    fun updateDohConfig(config: DohConfig) {
+        val previous = _dohConfig.value
+        if (previous == config) return
+        _dohConfig.value = config
+        saveDohConfig()
     }
 
     fun logEvent(

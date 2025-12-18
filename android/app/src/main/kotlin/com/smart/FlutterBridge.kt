@@ -71,10 +71,11 @@ class FlutterBridge(
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 eventSink = events
                 VpnStateRepository.setUiListening(true)
-                // Send current state immediately
-                scope.launch {
-                    val state = VpnStateRepository.vpnState.value
-                    events?.success(stateToMap(state))
+                scope.launch(Dispatchers.Main) {
+                    runCatching {
+                        val state = VpnStateRepository.vpnState.value
+                        events?.success(stateToMap(state))
+                    }
                 }
             }
 
@@ -125,6 +126,14 @@ class FlutterBridge(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "getVpnState" -> {
+                runCatching {
+                    val state = VpnStateRepository.vpnState.value
+                    result.success(stateToMap(state))
+                }.onFailure { e ->
+                    result.error("STATE_ERROR", e.message, null)
+                }
+            }
             "getTunnels" -> {
                 val tunnels = SmartConfigRepository.getTunnels()
                 result.success(tunnels)
@@ -146,7 +155,8 @@ class FlutterBridge(
                 result.success(
                     configToMap(
                         SmartConfigRepository.agentRuleConfig.value,
-                        SmartConfigRepository.appRuleConfig.value
+                        SmartConfigRepository.appRuleConfig.value,
+                        SmartConfigRepository.dohConfig.value
                     )
                 )
             }
@@ -184,6 +194,15 @@ class FlutterBridge(
                         version = currentVersion
                     )
                 )
+                result.success(null)
+            }
+            "getDohConfig" -> {
+                result.success(dohConfigToMap(SmartConfigRepository.dohConfig.value))
+            }
+            "setDohConfig" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                val dohUrl = call.argument<String>("dohUrl") ?: ""
+                SmartConfigRepository.updateDohConfig(DohConfig(enabled = enabled, dohUrl = dohUrl))
                 result.success(null)
             }
             "getInstalledApps" -> {
@@ -299,13 +318,14 @@ class FlutterBridge(
         }
     }
 
-    private fun configToMap(agent: AgentRuleConfig, appRule: AppRuleConfig): Map<String, Any> {
+    private fun configToMap(agent: AgentRuleConfig, appRule: AppRuleConfig, dohConfig: DohConfig): Map<String, Any> {
         val tunnelDisplayMap = SmartConfigRepository.getTunnels().associate { it["file"]!! to (it["name"] ?: it["file"]!!) }
         return mapOf(
             "enabled" to agent.enabled,
             "appRuleEnabled" to appRule.enabled,
             "selectedApps" to appRule.selectedApps,
             "appRuleVersion" to appRule.version,
+            "dohConfig" to dohConfigToMap(dohConfig),
             "rules" to agent.rules.map { rule ->
                 val display = tunnelDisplayMap[rule.tunnelFile] ?: rule.tunnelName
                 mapOf(
@@ -317,6 +337,13 @@ class FlutterBridge(
                     "enabled" to rule.enabled
                 )
             }
+        )
+    }
+
+    private fun dohConfigToMap(config: DohConfig): Map<String, Any> {
+        return mapOf(
+            "enabled" to config.enabled,
+            "dohUrl" to config.dohUrl
         )
     }
 

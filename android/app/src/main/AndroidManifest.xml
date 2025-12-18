@@ -33,7 +33,7 @@
 
     <application
         android:label="易连"
-        android:name="${applicationName}"
+        android:name=".SmartAgentApp"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
