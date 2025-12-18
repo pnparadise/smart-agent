@@ -1,21 +1,13 @@
 package com.smart
 
-import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.Drawable
-import android.net.Uri
-import android.net.wifi.WifiManager
-import android.os.Build
-import android.os.PowerManager
-import android.provider.Settings
-import android.content.ComponentName
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
+import com.smart.bridge.AppListHandler
+import com.smart.bridge.FileImportHandler
+import com.smart.bridge.SystemSettingsHandler
+import com.smart.bridge.VpnControlHandler
+import com.smart.component.SmartToast
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -23,14 +15,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import com.smart.component.SmartToast
 
 class FlutterBridge(
     private val activity: Activity,
     private val appContext: Context,
-    private val scope: CoroutineScope,
-    private val onImportConfig: (onComplete: (Boolean) -> Unit) -> Unit,
-    private val onToggleVpn: (String, Boolean) -> Unit
+    private val scope: CoroutineScope
 ) : MethodChannel.MethodCallHandler {
 
     companion object {
@@ -42,6 +31,11 @@ class FlutterBridge(
 
     private var eventSink: EventChannel.EventSink? = null
     private var updateSink: EventChannel.EventSink? = null
+
+    private val fileHandler = FileImportHandler(activity, appContext)
+    private val appHandler = AppListHandler(appContext)
+    private val systemHandler = SystemSettingsHandler(activity, appContext)
+    private val vpnHandler = VpnControlHandler(activity, appContext)
 
     fun setup(binaryMessenger: io.flutter.plugin.common.BinaryMessenger) {
         MethodChannel(binaryMessenger, CHANNEL_API).setMethodCallHandler(this)
@@ -102,7 +96,6 @@ class FlutterBridge(
             }
         })
 
-        // Listen to VPN state changes
         scope.launch {
             VpnStateRepository.vpnState.collect { state ->
                 launch(Dispatchers.Main) {
@@ -135,28 +128,49 @@ class FlutterBridge(
                 }
             }
             "getTunnels" -> {
-                val tunnels = SmartConfigRepository.getTunnels()
-                result.success(tunnels)
+                result.success(SmartConfigRepository.getTunnels())
             }
             "toggleTunnel" -> {
                 val file = call.argument<String>("file")
                 val active = call.argument<Boolean>("active") ?: false
                 if (file != null) {
-                    onToggleVpn(file, active)
+                    vpnHandler.toggleTunnel(file, active)
                     result.success(null)
                 } else {
                     result.error("INVALID_ARG", "File is null", null)
                 }
             }
             "importConfig" -> {
-                onImportConfig { success -> result.success(success) }
+                fileHandler.startImport(result)
             }
             "getSmartConfig" -> {
+                val agent = SmartConfigRepository.agentRuleConfig.value
+                val appRule = SmartConfigRepository.appRuleConfig.value
+                val doh = SmartConfigRepository.dohConfig.value
                 result.success(
-                    configToMap(
-                        SmartConfigRepository.agentRuleConfig.value,
-                        SmartConfigRepository.appRuleConfig.value,
-                        SmartConfigRepository.dohConfig.value
+                    mapOf(
+                        "agentRuleConfig" to mapOf(
+                            "enabled" to agent.enabled,
+                            "rules" to agent.rules.map { rule ->
+                                mapOf(
+                                    "id" to rule.id,
+                                    "type" to rule.type.name,
+                                    "value" to rule.value,
+                                    "tunnelFile" to rule.tunnelFile,
+                                    "tunnelName" to rule.tunnelName,
+                                    "enabled" to rule.enabled
+                                )
+                            }
+                        ),
+                        "appRuleConfig" to mapOf(
+                            "enabled" to appRule.enabled,
+                            "selectedApps" to appRule.selectedApps,
+                            "version" to appRule.version
+                        ),
+                        "dohConfig" to mapOf(
+                            "enabled" to doh.enabled,
+                            "dohUrl" to doh.dohUrl
+                        )
                     )
                 )
             }
@@ -197,7 +211,8 @@ class FlutterBridge(
                 result.success(null)
             }
             "getDohConfig" -> {
-                result.success(dohConfigToMap(SmartConfigRepository.dohConfig.value))
+                val doh = SmartConfigRepository.dohConfig.value
+                result.success(mapOf("enabled" to doh.enabled, "dohUrl" to doh.dohUrl))
             }
             "setDohConfig" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: false
@@ -206,19 +221,7 @@ class FlutterBridge(
                 result.success(null)
             }
             "getInstalledApps" -> {
-                // Load apps asynchronously to avoid blocking UI thread
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        val apps = getInstalledApps()
-                        launch(Dispatchers.Main) {
-                            result.success(apps)
-                        }
-                    } catch (e: Exception) {
-                        launch(Dispatchers.Main) {
-                            result.error("GET_APPS_ERROR", e.message, null)
-                        }
-                    }
-                }
+                appHandler.getInstalledApps(scope, result)
             }
             "getLogs" -> {
                 val limit = call.argument<Int>("limit") ?: 10
@@ -235,11 +238,10 @@ class FlutterBridge(
                 result.success(null)
             }
             "requestLocationPermission" -> {
-                val granted = requestLocationPermission()
-                result.success(granted)
+                result.success(systemHandler.requestLocationPermission())
             }
             "getSavedSsids" -> {
-                result.success(getSavedSsids())
+                result.success(systemHandler.getSavedSsids())
             }
             "getCurrentGatewayIp" -> {
                 result.success(SmartRuleManager.getCurrentGatewayIp())
@@ -267,23 +269,19 @@ class FlutterBridge(
                 } else result.error("INVALID_ARG", "File is null", null)
             }
             "isIgnoringBatteryOptimizations" -> {
-                result.success(isIgnoringBatteryOptimizations())
+                result.success(systemHandler.isIgnoringBatteryOptimizations())
             }
             "requestIgnoreBatteryOptimizations" -> {
-                val granted = requestIgnoreBatteryOptimizations()
-                result.success(granted)
+                result.success(systemHandler.requestIgnoreBatteryOptimizations())
             }
             "openBatteryOptimizationSettings" -> {
-                val ok = openBatteryOptimizationSettings()
-                result.success(ok)
+                result.success(systemHandler.openBatteryOptimizationSettings())
             }
             "openAutoStartSettings" -> {
-                val ok = openAutoStartSettings()
-                result.success(ok)
+                result.success(systemHandler.openAutoStartSettings())
             }
             "getAppVersion" -> {
-                val pkgInfo = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
-                result.success(pkgInfo.versionName ?: "0.0.0")
+                result.success(systemHandler.getAppVersion())
             }
             "checkForUpdate" -> {
                 scope.launch(Dispatchers.IO) {
@@ -318,283 +316,9 @@ class FlutterBridge(
         }
     }
 
-    private fun configToMap(agent: AgentRuleConfig, appRule: AppRuleConfig, dohConfig: DohConfig): Map<String, Any> {
-        val tunnelDisplayMap = SmartConfigRepository.getTunnels().associate { it["file"]!! to (it["name"] ?: it["file"]!!) }
-        return mapOf(
-            "enabled" to agent.enabled,
-            "appRuleEnabled" to appRule.enabled,
-            "selectedApps" to appRule.selectedApps,
-            "appRuleVersion" to appRule.version,
-            "dohConfig" to dohConfigToMap(dohConfig),
-            "rules" to agent.rules.map { rule ->
-                val display = tunnelDisplayMap[rule.tunnelFile] ?: rule.tunnelName
-                mapOf(
-                    "id" to rule.id,
-                    "type" to rule.type.name,
-                    "value" to rule.value,
-                    "tunnelFile" to rule.tunnelFile,
-                    "tunnelName" to display,
-                    "enabled" to rule.enabled
-                )
-            }
-        )
-    }
-
-    private fun dohConfigToMap(config: DohConfig): Map<String, Any> {
-        return mapOf(
-            "enabled" to config.enabled,
-            "dohUrl" to config.dohUrl
-        )
-    }
-
-    private fun getInstalledApps(): List<Map<String, Any?>> {
-        val pm = appContext.packageManager
-        val apps = pm.getInstalledApplications(0)
-        return apps.mapNotNull { app ->
-            val packageName = app.packageName
-            val label = pm.getApplicationLabel(app)?.toString() ?: packageName
-            val iconBytes = runCatching { drawableToPng(pm.getApplicationIcon(app)) }.getOrNull()
-            mapOf(
-                "name" to label,
-                "package" to packageName,
-                "icon" to iconBytes
-            )
-        }
-    }
-
-    private fun drawableToPng(drawable: Drawable): ByteArray {
-        val bitmap = if (drawable is BitmapDrawable && drawable.bitmap != null) {
-            drawable.bitmap
-        } else {
-            val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: 48
-            val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: 48
-            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            drawable.setBounds(0, 0, canvas.width, canvas.height)
-            drawable.draw(canvas)
-            bmp
-        }
-        val stream = java.io.ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-        return stream.toByteArray()
-    }
-
-    private fun requestLocationPermission(): Boolean {
-        val permissions = mutableListOf<String>()
-        val fineGranted = hasFineLocation()
-        if (!fineGranted) {
-            permissions.add(android.Manifest.permission.ACCESS_FINE_LOCATION)
-            permissions.add(android.Manifest.permission.ACCESS_COARSE_LOCATION)
-        }
-
-        if (permissions.isNotEmpty()) {
-            ActivityCompat.requestPermissions(activity, permissions.toTypedArray(), 3001)
-        }
-
-        return hasFineLocation() && isLocationEnabled()
-    }
-
-    private fun hasFineLocation(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            appContext,
-            android.Manifest.permission.ACCESS_FINE_LOCATION
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun isLocationEnabled(): Boolean {
-        val locationManager = appContext.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
-            ?: return false
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            locationManager.isLocationEnabled
-        } else {
-            locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
-        }
-    }
-
-    private fun getSavedSsids(): List<String> {
-        val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return emptyList()
-        val fineGranted = hasFineLocation() && isLocationEnabled()
-        if (!fineGranted) return emptyList()
-
-        // Trigger a fresh scan to increase likelihood of results on newer Android versions.
-        runCatching { wifiManager.startScan() }
-
-        val nearby = runCatching { wifiManager.scanResults ?: emptyList() }.getOrDefault(emptyList())
-            .mapNotNull { it.SSID?.removeSurrounding("\"") }
-            .filter { it.isNotBlank() && it != "<unknown ssid>" }
-
-        val configs = runCatching { wifiManager.configuredNetworks ?: emptyList() }.getOrDefault(emptyList())
-            .mapNotNull { it.SSID?.removeSurrounding("\"") }
-            .filter { it.isNotBlank() && it != "<unknown ssid>" }
-
-        val currentSsid = runCatching { wifiManager.connectionInfo?.ssid?.removeSurrounding("\"") }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() && it != "<unknown ssid>" }
-
-        return (nearby + configs + listOfNotNull(currentSsid)).distinct()
-    }
-
-    private fun isIgnoringBatteryOptimizations(): Boolean {
-        val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
-        return pm.isIgnoringBatteryOptimizations(appContext.packageName)
-    }
-
-    private fun requestIgnoreBatteryOptimizations(): Boolean {
-        if (isIgnoringBatteryOptimizations()) return true
-        return try {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:${appContext.packageName}")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            activity.startActivity(intent)
-            isIgnoringBatteryOptimizations()
-        } catch (e: Exception) {
-            // Fallback to settings page if direct request fails
-            runCatching {
-                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                activity.startActivity(intent)
-            }
-            false
-        }
-    }
-
-    private fun openBatteryOptimizationSettings(): Boolean {
-        val intents = listOf(
-            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = Uri.parse("package:${appContext.packageName}")
-            }
-        )
-
-        intents.forEach { intent ->
-            val resolved = appContext.packageManager.queryIntentActivities(intent, 0)
-            if (resolved.isNotEmpty()) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                return runCatching {
-                    activity.startActivity(intent)
-                    true
-                }.getOrDefault(false)
-            }
-        }
-        return false
-    }
-
-    private fun openAutoStartSettings(): Boolean {
-        val manufacturer = Build.MANUFACTURER.lowercase()
-        val intents = mutableListOf<Intent>()
-
-        when {
-            manufacturer.contains("huawei") || manufacturer.contains("honor") -> {
-                intents.addAll(
-                    listOf(
-                        Intent(Intent.ACTION_MAIN).setComponent(
-                            ComponentName(
-                                "com.huawei.systemmanager",
-                                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
-                            )
-                        ),
-                        Intent(Intent.ACTION_MAIN).setComponent(
-                            ComponentName(
-                                "com.huawei.systemmanager",
-                                "com.huawei.systemmanager.optimize.process.ProtectActivity"
-                            )
-                        ),
-                        Intent(Intent.ACTION_MAIN).setComponent(
-                            ComponentName(
-                                "com.hihonor.systemmanager",
-                                "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
-                            )
-                        ),
-                        Intent(Intent.ACTION_MAIN).setComponent(
-                            ComponentName(
-                                "com.hihonor.systemmanager",
-                                "com.hihonor.systemmanager.optimize.process.ProtectActivity"
-                            )
-                        )
-                    )
-                )
-            }
-            manufacturer.contains("xiaomi") -> intents.add(
-                Intent(Intent.ACTION_MAIN).setComponent(
-                    ComponentName(
-                        "com.miui.securitycenter",
-                        "com.miui.permcenter.autostart.AutoStartManagementActivity"
-                    )
-                )
-            )
-            manufacturer.contains("vivo") || manufacturer.contains("iqoo") -> {
-                intents.add(
-                    Intent(Intent.ACTION_MAIN).setComponent(
-                        ComponentName(
-                            "com.iqoo.secure",
-                            "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"
-                        )
-                    )
-                )
-                intents.add(
-                    Intent(Intent.ACTION_MAIN).setComponent(
-                        ComponentName(
-                            "com.vivo.permissionmanager",
-                            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
-                        )
-                    )
-                )
-            }
-            manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme") -> {
-                intents.add(
-                    Intent(Intent.ACTION_MAIN).setComponent(
-                        ComponentName(
-                            "com.coloros.phonemanager",
-                            "com.coloros.phonemanager.startupapp.StartupAppListActivity"
-                        )
-                    )
-                )
-                intents.add(
-                    Intent(Intent.ACTION_MAIN).setComponent(
-                        ComponentName(
-                            "com.coloros.safecenter",
-                            "com.coloros.safecenter.startupapp.StartupAppListActivity"
-                        )
-                    )
-                )
-                intents.add(
-                    Intent(Intent.ACTION_MAIN).setComponent(
-                        ComponentName(
-                            "com.oppo.safe",
-                            "com.oppo.safe.permission.startup.StartupAppListActivity"
-                        )
-                    )
-                )
-            }
-        }
-
-        // Generic fallbacks
-        intents.addAll(
-            listOf(
-                Intent(Intent.ACTION_MAIN).setComponent(
-                    ComponentName(
-                        "com.letv.android.letvsafe",
-                        "com.letv.android.letvsafe.AutobootManageActivity"
-                    )
-                ),
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:${appContext.packageName}")
-                }
-            )
-        )
-
-        intents.forEach { intent ->
-            val resolved = appContext.packageManager.queryIntentActivities(intent, 0)
-            if (resolved.isNotEmpty()) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                return runCatching {
-                    activity.startActivity(intent)
-                    true
-                }.getOrDefault(false)
-            }
-        }
+    fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (fileHandler.handleActivityResult(requestCode, resultCode, data)) return true
+        if (vpnHandler.handleActivityResult(requestCode, resultCode, data)) return true
         return false
     }
 }

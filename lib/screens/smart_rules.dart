@@ -149,20 +149,22 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     try {
       final config = await SmartAgentApi.getSmartConfig();
       final tunnels = await SmartAgentApi.getTunnels();
-      final dohConfig = await SmartAgentApi.getDohConfig();
+      final agentConfig = Map<String, dynamic>.from(config['agentRuleConfig'] ?? {});
+      final appRuleConfig = Map<String, dynamic>.from(config['appRuleConfig'] ?? {});
+      final dohConfig = Map<String, dynamic>.from(config['dohConfig'] ?? {});
       final ignoringBatteryOpt = await SmartAgentApi.isIgnoringBatteryOptimizations();
       if (mounted) {
         setState(() {
-          _agentRuleEnabled = config['enabled'] as bool;
-          _appRuleEnabled = config['appRuleEnabled'] as bool? ?? false;
-          _selectedApps = (config['selectedApps'] as List?)?.cast<String>() ?? [];
-          _rules = (config['rules'] as List)
+          _agentRuleEnabled = agentConfig['enabled'] as bool? ?? false;
+          _appRuleEnabled = appRuleConfig['enabled'] as bool? ?? false;
+          _selectedApps = (appRuleConfig['selectedApps'] as List?)?.cast<String>() ?? [];
+          _rules = (agentConfig['rules'] as List? ?? [])
               .map((e) => AgentRule.fromMap(Map<String, dynamic>.from(e)))
               .toList();
           _tunnels = tunnels;
-          _dohEnabled = dohConfig.enabled;
-          _dohUrl = dohConfig.dohUrl;
-          _dohController.text = _extractDomain(dohConfig.dohUrl);
+          _dohEnabled = dohConfig['enabled'] as bool? ?? false;
+          _dohUrl = dohConfig['dohUrl'] as String? ?? '';
+          _dohController.text = _extractDomain(_dohUrl);
           _batteryProtected = ignoringBatteryOpt;
           _loading = false;
         });
@@ -315,11 +317,11 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       if (mounted) {
         setState(() {
           _editingRuleId = newRule.id;
-      _formType = RuleType.wifiSsid;
-      _ssidController.text = '';
-      _gatewayController.text = '';
-      _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
-    });
+          _formType = RuleType.wifiSsid;
+          _ssidController.text = '';
+          _gatewayController.text = '';
+          _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
+        });
 
       }
     });

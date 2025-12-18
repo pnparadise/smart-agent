@@ -63,7 +63,7 @@
            如果不涉及到后台持续定位或后台文件上传，建议精简为 "connectedDevice" 一种即可。
         -->
         <service
-            android:name=".SmartAgent"
+            android:name=".SmartAgentVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false"
             android:foregroundServiceType="dataSync|location|connectedDevice">

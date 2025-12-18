@@ -1,3 +1,5 @@
+package com.smart
+
 import com.wireguard.config.Config
 import com.wireguard.config.InetEndpoint
 import com.wireguard.config.Peer
