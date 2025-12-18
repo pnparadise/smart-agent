@@ -18,6 +18,8 @@ object VpnStateRepository {
     val vpnState = _vpnState.asStateFlow()
     @Volatile
     var hasUiListener: Boolean = false
+    @Volatile
+    var uiListenerCallback: ((Boolean) -> Unit)? = null
 
     fun updateState(newState: VpnState) {
         _vpnState.value = newState
@@ -25,5 +27,6 @@ object VpnStateRepository {
 
     fun setUiListening(listening: Boolean) {
         hasUiListener = listening
+        uiListenerCallback?.invoke(listening)
     }
 }

@@ -48,6 +48,15 @@ class SmartAgentVpnService : VpnService() {
         super.onCreate()
         SmartConfigRepository.init(this)
         backend = GoBackend(this@SmartAgentVpnService)
+        VpnStateRepository.uiListenerCallback = { listening ->
+            coroutineScope.launch {
+                if (listening) {
+                    startStatsPollingFromState()
+                } else {
+                    stopStatsPolling()
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,6 +83,7 @@ class SmartAgentVpnService : VpnService() {
     override fun onDestroy() {
         super.onDestroy()
         stopVpn()
+        VpnStateRepository.uiListenerCallback = null
     }
 
     private fun notifyState(state: VpnState) {
@@ -196,7 +206,7 @@ class SmartAgentVpnService : VpnService() {
                 backend.setState(newTunnel, Tunnel.State.UP, config)
                 activeTunnel = newTunnel
                 updateNotification("已连接 $targetTunnelName")
-                startStatsPolling(targetTunnelName, fileName)
+                startStatsPollingIfNeeded(targetTunnelName, fileName)
 
             } catch (e: Exception) {
 
@@ -221,8 +231,7 @@ class SmartAgentVpnService : VpnService() {
                 backend.setState(it, Tunnel.State.DOWN, null)
             }
             activeTunnel = null
-            statsJob?.cancel()
-            statsJob = null
+            stopStatsPolling()
             activeAppRuleVersion = null
             notifyState(
                 VpnState(
@@ -274,17 +283,30 @@ class SmartAgentVpnService : VpnService() {
     private fun getStats(): Statistics? =
         runCatching { backend.getStatistics(activeTunnel) }.getOrNull()
 
-    private fun startStatsPolling(tunnelName: String, tunnelFile: String) {
+    private fun startStatsPollingFromState() {
+        val state = VpnStateRepository.vpnState.value
+        val name = state.tunnelName ?: return
+        val file = state.tunnelFile ?: return
+        startStatsPollingIfNeeded(name, file)
+    }
+
+    private fun startStatsPollingIfNeeded(tunnelName: String, tunnelFile: String) {
+        if (statsJob != null) return
+        if (activeTunnel == null) return
+        if (!VpnStateRepository.hasUiListener) return
+
         statsJob?.cancel()
         statsJob = coroutineScope.launch(Dispatchers.IO) {
-            while (true) {
-                if (activeTunnel == null) break
-                if (VpnStateRepository.hasUiListener) {
-                    pushStats(tunnelName, tunnelFile)
-                }
+            while (activeTunnel != null && VpnStateRepository.hasUiListener) {
+                pushStats(tunnelName, tunnelFile)
                 delay(1000)
             }
         }
+    }
+
+    private fun stopStatsPolling() {
+        statsJob?.cancel()
+        statsJob = null
     }
 
     private suspend fun applyDohConfig(originalConfig: Config): Config {
