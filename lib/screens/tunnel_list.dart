@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../api.dart';
@@ -16,6 +17,8 @@ class TunnelListScreen extends StatefulWidget {
 class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerProviderStateMixin {
   List<LocalTunnel> _tunnels = [];
   bool _loading = true;
+  VpnState? _currentState;
+  StreamSubscription<VpnState>? _vpnSub;
   late AnimationController _fabController;
   late Animation<double> _expandAnimation;
 
@@ -55,10 +58,12 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
       reverseCurve: Curves.easeIn, // Changed from easeInBack to easeIn for immediate start
     );
     _loadTunnels();
+    _initVpnState();
   }
 
   @override
   void dispose() {
+    _vpnSub?.cancel();
     _fabController.dispose();
     super.dispose();
   }
@@ -84,50 +89,57 @@ class _TunnelListScreenState extends State<TunnelListScreen> with SingleTickerPr
     }
   }
 
+  Future<void> _initVpnState() async {
+    _vpnSub = SmartAgentApi.vpnStateStream.listen((state) {
+      setState(() {
+        _currentState = state;
+      });
+    });
+    final initial = await SmartAgentApi.getVpnState();
+    if (mounted) {
+      setState(() => _currentState = initial);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<VpnState>(
-      stream: SmartAgentApi.vpnStateStream,
-      builder: (context, snapshot) {
-        final vpnState = snapshot.data ?? VpnState(isRunning: false);
-        return Scaffold(
-          body: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () {
-              if (_fabController.isCompleted) {
-                _fabController.reverse();
-              }
-            },
-            child: RefreshIndicator(
-              onRefresh: _loadTunnels,
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  _buildStatusCard(vpnState),
-                  const SizedBox(height: 24),
-                  Text(
-                    'AVAILABLE TUNNELS',
-                    style: GoogleFonts.inter(
-                      color: AppTheme.textSecondary,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 1.0,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  if (_loading)
-                    const Center(child: CircularProgressIndicator())
-                  else if (_tunnels.isEmpty)
-                    _buildEmptyState()
-                  else
-                    ..._tunnels.map((t) => _buildTunnelItem(t, vpnState)),
-                ],
+    final vpnState = _currentState ?? VpnState(isRunning: false);
+    return Scaffold(
+      body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          if (_fabController.isCompleted) {
+            _fabController.reverse();
+          }
+        },
+        child: RefreshIndicator(
+          onRefresh: _loadTunnels,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _buildStatusCard(vpnState),
+              const SizedBox(height: 24),
+              Text(
+                'AVAILABLE TUNNELS',
+                style: GoogleFonts.inter(
+                  color: AppTheme.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.0,
+                ),
               ),
-            ),
+              const SizedBox(height: 12),
+              if (_loading)
+                const Center(child: CircularProgressIndicator())
+              else if (_tunnels.isEmpty)
+                _buildEmptyState()
+              else
+                ..._tunnels.map((t) => _buildTunnelItem(t, vpnState)),
+            ],
           ),
-          floatingActionButton: _buildFab(),
-        );
-      },
+        ),
+      ),
+      floatingActionButton: _buildFab(),
     );
   }
 

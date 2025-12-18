@@ -17,11 +17,21 @@ class SmartRulesScreen extends StatefulWidget {
 }
 
 class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBindingObserver {
-  bool _enabled = false;
+  bool _agentRuleEnabled = false;
   bool _appRuleEnabled = false;
   List<String> _selectedApps = [];
   List<AgentRule> _rules = [];
   List<LocalTunnel> _tunnels = [];
+  bool _dohEnabled = false;
+  String _dohUrl = '';
+  final TextEditingController _dohController = TextEditingController();
+  final FocusNode _dohFocusNode = FocusNode(skipTraversal: true);
+  final List<DohPreset> _dohPresets = const [
+    DohPreset('Aliyun', 'https://dns.alidns.com/dns-query'),
+    DohPreset('Google', 'https://dns.google/dns-query'),
+    DohPreset('Cloudflare', 'https://cloudflare-dns.com/dns-query'),
+    DohPreset('Tencent', 'https://doh.pub/dns-query'),
+  ];
 
   // 编辑状态
   RuleType _formType = RuleType.wifiSsid;
@@ -63,6 +73,8 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   void dispose() {
     _ssidController.dispose();
     _gatewayController.dispose();
+    _dohController.dispose();
+    _dohFocusNode.dispose();
     _scrollController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _updateSub?.cancel();
@@ -137,16 +149,20 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     try {
       final config = await SmartAgentApi.getSmartConfig();
       final tunnels = await SmartAgentApi.getTunnels();
+      final dohConfig = await SmartAgentApi.getDohConfig();
       final ignoringBatteryOpt = await SmartAgentApi.isIgnoringBatteryOptimizations();
       if (mounted) {
         setState(() {
-          _enabled = config['enabled'] as bool;
+          _agentRuleEnabled = config['enabled'] as bool;
           _appRuleEnabled = config['appRuleEnabled'] as bool? ?? false;
           _selectedApps = (config['selectedApps'] as List?)?.cast<String>() ?? [];
           _rules = (config['rules'] as List)
               .map((e) => AgentRule.fromMap(Map<String, dynamic>.from(e)))
               .toList();
           _tunnels = tunnels;
+          _dohEnabled = dohConfig.enabled;
+          _dohUrl = dohConfig.dohUrl;
+          _dohController.text = _extractDomain(dohConfig.dohUrl);
           _batteryProtected = ignoringBatteryOpt;
           _loading = false;
         });
@@ -190,7 +206,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   Future<void> _saveAgentRuleConfig() async {
     final validRules = _rules.where((r) => r.id != 'TEMP_NEW_RULE').toList();
     await SmartAgentApi.setAgentRuleConfig(
-      enabled: _enabled,
+      enabled: _agentRuleEnabled,
       rules: validRules,
     );
     if (mounted && !_isAddingNew) {
@@ -202,6 +218,39 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     await SmartAgentApi.setAppRuleConfig(
       appRuleEnabled: _appRuleEnabled,
       selectedApps: _selectedApps,
+    );
+  }
+
+  String _extractDomain(String url) {
+    if (url.isEmpty) return '';
+    var domain = url;
+    if (domain.startsWith('https://')) {
+      domain = domain.substring(8);
+    }
+    if (domain.endsWith('/dns-query')) {
+      domain = domain.substring(0, domain.length - 10);
+    }
+    return domain;
+  }
+
+  String _assembleUrl(String domain) {
+    if (domain.isEmpty) return '';
+    var cleanDomain = domain.trim();
+    if (cleanDomain.startsWith('https://')) {
+      cleanDomain = cleanDomain.substring(8);
+    }
+    if (cleanDomain.endsWith('/dns-query')) {
+      cleanDomain = cleanDomain.substring(0, cleanDomain.length - 10);
+    }
+    return 'https://$cleanDomain/dns-query';
+  }
+
+  Future<void> _saveDohConfig() async {
+    final fullUrl = _assembleUrl(_dohController.text);
+    setState(() => _dohUrl = fullUrl);
+    await SmartAgentApi.setDohConfig(
+      enabled: _dohEnabled,
+      dohUrl: fullUrl,
     );
   }
 
@@ -266,30 +315,19 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       if (mounted) {
         setState(() {
           _editingRuleId = newRule.id;
-          _formType = RuleType.wifiSsid;
-          _ssidController.text = '';
-          _gatewayController.text = '';
-          _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
-        });
+      _formType = RuleType.wifiSsid;
+      _ssidController.text = '';
+      _gatewayController.text = '';
+      _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
+    });
 
-        // 核心修改逻辑：
-        // 1. 先让 AnimatedSize 跑完动画（UI中设定是300ms）。
-        // 2. 设置 350ms 的延时，确保高度已经完全撑开。
-        // 3. alignment: 1.0 强制将卡片的底部对齐到屏幕的底部。
-        Future.delayed(const Duration(milliseconds: 200), () {
-          if (_scrollController.hasClients) {
-            _scrollController.animateTo(
-              _scrollController.position.maxScrollExtent, // 滚动到底部，自然露出底部的 60px 留白
-              duration: const Duration(milliseconds: 400),
-              curve: Curves.easeOutCubic,
-            );
-          }
-        });
       }
     });
   }
 
   void _startEdit(AgentRule rule) {
+    FocusScope.of(context).unfocus();
+    _dohFocusNode.unfocus();
     if (_editingRuleId != null && _editingRuleId != rule.id) {
       _cancelEdit();
     }
@@ -397,7 +435,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
           SliverToBoxAdapter(child: _buildAppRuleCard()),
           SliverToBoxAdapter(child: _buildAgentRuleCard()),
 
-          if (_enabled)
+          if (_agentRuleEnabled)
             SliverReorderableList(
               onReorder: (oldIndex, newIndex) {
                 if (_editingRuleId != null) return;
@@ -416,11 +454,12 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
               },
             ),
 
-          if (_enabled && !_isAddingNew)
+          if (_agentRuleEnabled && !_isAddingNew)
             SliverToBoxAdapter(
               child: _buildAddButton(),
             ),
 
+          SliverToBoxAdapter(child: _buildDohCard()),
           SliverToBoxAdapter(child: _buildBatteryOptimizationCard()),
           SliverToBoxAdapter(child: _buildAutoStartCard()),
           SliverToBoxAdapter(child: _buildVersionCard()),
@@ -603,6 +642,215 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
     );
   }
 
+  Widget _buildDohCard() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: AppTheme.cardShadow,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'DNS over HTTPS',
+                      style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '通过 DoH 解析隧道域名',
+                      style: GoogleFonts.inter(color: AppTheme.textSecondary, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+              _buildToggleSwitch(
+                value: _dohEnabled,
+                onChanged: (val) {
+                  setState(() {
+                    _dohEnabled = val;
+                    if (val && _dohController.text.trim().isEmpty) {
+                      _dohController.text = _extractDomain(_dohPresets.first.url);
+                      _dohUrl = _dohPresets.first.url;
+                    }
+                  });
+                  if (!val) FocusScope.of(context).unfocus();
+                  _saveDohConfig();
+                },
+              )
+            ],
+          ),
+
+          if (_dohEnabled) ...[
+            const Divider(height: 24, thickness: 1, color: Color(0xFFF2F4F7)),
+            const SizedBox(height: 8),
+
+            Container(
+              height: 44,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE6E9EF)), // 外框保留淡边框
+              ),
+              padding: const EdgeInsets.only(left: 12, right: 8), // 调整Padding
+              child: Row(
+                children: [
+                  // --- 左侧滚动区域 (核心修改) ---
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      // 不使用 Center，自然左对齐
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min, // 紧凑排列
+                        children: [
+                          // 1. 前缀
+                          Padding(
+                            padding: const EdgeInsets.only(right: 0), // 紧贴输入框
+                            child: Text(
+                              'https://',
+                              style: GoogleFonts.inter(
+                                color: AppTheme.textSecondary,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+
+                          // 2. 域名输入框 (宽度自适应)
+                          IntrinsicWidth(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(minWidth: 40), // 最小宽度，方便点击
+                              child: Focus(
+                                onFocusChange: (hasFocus) {
+                                  if (!hasFocus) _saveDohConfig();
+                                },
+                                child: TextField(
+                                  focusNode: _dohFocusNode,
+                                  controller: _dohController,
+                                  autofocus: false,
+                                  style: GoogleFonts.inter(fontSize: 14, color: AppTheme.textPrimary),
+                                  // 彻底去除边框和背景
+                                  decoration: const InputDecoration(
+                                    hintText: '1.1.1.1',
+                                    hintStyle: TextStyle(color: Colors.black26),
+                                    border: InputBorder.none,
+                                    focusedBorder: InputBorder.none,
+                                    enabledBorder: InputBorder.none,
+                                    errorBorder: InputBorder.none,
+                                    disabledBorder: InputBorder.none,
+                                    contentPadding: EdgeInsets.symmetric(horizontal: 2), // 微调间距
+                                    isDense: true,
+                                    fillColor: Colors.transparent,
+                                    filled: false,
+                                  ),
+                                  keyboardType: TextInputType.url,
+                                  textInputAction: TextInputAction.done,
+                                  textAlign: TextAlign.start, // 左对齐输入
+                                  onChanged: (val) {
+                                    setState(() => _dohUrl = _assembleUrl(val));
+                                  },
+                                  onEditingComplete: () {
+                                    FocusScope.of(context).unfocus();
+                                    _saveDohConfig();
+                                  },
+                                  onTapOutside: (_) {
+                                    FocusScope.of(context).unfocus();
+                                    _saveDohConfig();
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          // 3. 后缀 (紧贴着域名显示)
+                          Text(
+                            '/dns-query',
+                            style: GoogleFonts.inter(
+                              color: AppTheme.textSecondary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // --- 右侧固定区域 ---
+                  // 分割线
+                  Container(
+                    height: 16,
+                    width: 1,
+                    color: const Color(0xFFE6E9EF),
+                    margin: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+
+                  // 下拉箭头
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: PopupMenuButton<String>(
+                      padding: EdgeInsets.zero,
+                      color: Colors.white,
+                      surfaceTintColor: Colors.white,
+                      elevation: 4,
+                      icon: const Icon(
+                        Icons.keyboard_arrow_down,
+                        color: AppTheme.textSecondary,
+                        size: 20,
+                      ),
+                      tooltip: '选择预设',
+                      offset: const Offset(0, 30),
+                      onSelected: (fullUrl) {
+                        FocusScope.of(context).unfocus();
+                        _dohFocusNode.unfocus();
+                        setState(() {
+                          _dohController.text = _extractDomain(fullUrl);
+                          _dohUrl = fullUrl;
+                        });
+                        _saveDohConfig();
+                      },
+                      itemBuilder: (context) {
+                        return _dohPresets.map(
+                              (p) => PopupMenuItem<String>(
+                            value: p.url,
+                            height: 40,
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    p.label,
+                                    style: GoogleFonts.inter(fontSize: 13),
+                                  ),
+                                ),
+                                if (p.url == _dohUrl)
+                                  const Icon(Icons.check, size: 16, color: AppTheme.vultrBlue),
+                              ],
+                            ),
+                          ),
+                        ).toList();
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ]
+        ],
+      ),
+    );
+  }
+
   Widget _buildVersionCard() {
     final latest = _updateStatus.latestVersion;
     final hasNewReady = latest != null && latest != _appVersion && !_updateStatus.isActive;
@@ -734,9 +982,9 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
             ),
           ),
           _buildToggleSwitch(
-            value: _enabled,
+            value: _agentRuleEnabled,
             onChanged: (val) {
-              setState(() => _enabled = val);
+              setState(() => _agentRuleEnabled = val);
               _saveAgentRuleConfig();
               if (val) {
                 SmartAgentApi.requestLocationPermission();

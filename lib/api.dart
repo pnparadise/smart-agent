@@ -5,7 +5,6 @@ class SmartAgentApi {
   static const MethodChannel _channel = MethodChannel('com.smart/api');
   static const EventChannel _eventChannel = EventChannel('com.smart/events');
   static const EventChannel _updateChannel = EventChannel('com.smart/update_events');
-
   static Future<List<LocalTunnel>> getTunnels() async {
     final List<dynamic> result = await _channel.invokeMethod('getTunnels');
     return result.map((e) => LocalTunnel.fromMap(Map<String, dynamic>.from(e))).toList();
@@ -107,6 +106,21 @@ class SmartAgentApi {
     });
   }
 
+  static Future<DohConfig> getDohConfig() async {
+    final result = await _channel.invokeMethod<Map>('getDohConfig');
+    return DohConfig.fromMap(Map<String, dynamic>.from(result ?? {}));
+  }
+
+  static Future<void> setDohConfig({
+    required bool enabled,
+    required String dohUrl,
+  }) async {
+    await _channel.invokeMethod('setDohConfig', {
+      'enabled': enabled,
+      'dohUrl': dohUrl,
+    });
+  }
+
   static Future<bool> isIgnoringBatteryOptimizations() async {
     final granted = await _channel.invokeMethod<bool>('isIgnoringBatteryOptimizations');
     return granted ?? false;
@@ -151,6 +165,18 @@ class SmartAgentApi {
     return _eventChannel.receiveBroadcastStream().map((event) {
       return VpnState.fromMap(Map<String, dynamic>.from(event));
     });
+  }
+
+  static Future<VpnState> getVpnState() async {
+    try {
+      final Map<dynamic, dynamic>? result = await _channel.invokeMethod('getVpnState');
+      if (result != null) {
+        return VpnState.fromMap(Map<String, dynamic>.from(result));
+      }
+    } catch (e) {
+      // swallow and fallback
+    }
+    return VpnState(isRunning: false, tunnelName: "", tunnelFile: "");
   }
 
   static Stream<UpdateStatus> get updateStream {

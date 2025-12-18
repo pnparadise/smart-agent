@@ -78,4 +78,6 @@ dependencies {
 
     // WireGuard
     implementation("com.wireguard.android:tunnel:1.0.20250531")
+
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

@@ -52,7 +52,7 @@ SmartAgent 采用 **Flutter (UI)** + **Kotlin (Native)** 的混合架构，兼�
 │   └── models.dart       # 数据模型 (AgentRule, AppRule, VpnState)
 ├── android/              # Android 侧：原生业务逻辑
 │   └── .../com/smart/
-│       ├── SmartAgent.kt       # VPN Service 核心，负责隧道启停与流量拦截
+│       ├── SmartAgentVpnService.kt       # VPN Service 核心，负责隧道启停与流量拦截
 │       ├── SmartRuleManager.kt # 监听网络变更 (Wi-Fi/IP) 并触发规则匹配
 │       ├── SmartConfigDb.kt    # 基于 Room/SQLite 的配置、规则与日志持久化
 │       └── FlutterBridge.kt    # MethodChannel/EventChannel 通信桥梁

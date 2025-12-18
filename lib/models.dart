@@ -123,6 +123,34 @@ class InstalledApp {
   }
 }
 
+class DohConfig {
+  final bool enabled;
+  final String dohUrl;
+
+  DohConfig({required this.enabled, required this.dohUrl});
+
+  factory DohConfig.fromMap(Map<String, dynamic> map) {
+    return DohConfig(
+      enabled: map['enabled'] as bool? ?? false,
+      dohUrl: map['dohUrl'] as String? ?? '',
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'enabled': enabled,
+      'dohUrl': dohUrl,
+    };
+  }
+}
+
+class DohPreset {
+  final String label;
+  final String url;
+
+  const DohPreset(this.label, this.url);
+}
+
 extension RuleTypeParser on RuleType {
   static RuleType fromNative(String value) {
     switch (value.toUpperCase()) {
