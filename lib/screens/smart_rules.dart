@@ -34,7 +34,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
   ];
 
   // 编辑状态
-  RuleType _formType = RuleType.wifiSsid;
+  RuleType _formType = RuleType.wifiGateway;
   final TextEditingController _ssidController = TextEditingController();
   final TextEditingController _gatewayController = TextEditingController();
   String? _formTunnel;
@@ -301,7 +301,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
 
     final newRule = AgentRule(
       id: 'TEMP_NEW_RULE',
-      type: RuleType.wifiSsid,
+      type: RuleType.wifiGateway,
       value: '',
       tunnelFile: '',
       tunnelName: '直连',
@@ -317,7 +317,7 @@ class _SmartRulesScreenState extends State<SmartRulesScreen> with WidgetsBinding
       if (mounted) {
         setState(() {
           _editingRuleId = newRule.id;
-          _formType = RuleType.wifiSsid;
+          _formType = RuleType.wifiGateway;
           _ssidController.text = '';
           _gatewayController.text = '';
           _formTunnel = _tunnels.isNotEmpty ? _tunnels.first.file : null;
