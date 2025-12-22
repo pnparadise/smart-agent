@@ -30,6 +30,7 @@ import java.io.ByteArrayInputStream
 class SmartAgentVpnService : VpnService() {
 
     private var activeTunnel: Tunnel? = null
+    private var activeTunnelFile: String? = null
     private lateinit var backend: GoBackend
     private val coroutineScope = CoroutineScope(Dispatchers.Main)
     private var statsJob: Job? = null
@@ -160,7 +161,6 @@ class SmartAgentVpnService : VpnService() {
                 var config = applyAppRuleConfig(configWithDoh)
                 val appRuleConfig = SmartConfigRepository.appRuleConfig.value
                 activeAppRuleVersion = if (appRuleConfig.enabled) appRuleConfig.version else null
-
                 notifyState(
                     VpnState(
                         isRunning = true,
@@ -183,7 +183,7 @@ class SmartAgentVpnService : VpnService() {
                         val me = this
                         coroutineScope.launch(Dispatchers.Main) {
                             when (newState) {
-                                Tunnel.State.UP -> pushStats(targetTunnelName, fileName)
+                                Tunnel.State.UP -> pushStats()
                                 Tunnel.State.DOWN -> {
                                     if (activeTunnel === me) {
                                         VpnStateRepository.updateState(
@@ -195,6 +195,7 @@ class SmartAgentVpnService : VpnService() {
                                             )
                                         )
                                         activeTunnel = null
+                                        activeTunnelFile = null
                                         activeAppRuleVersion = null
                                     }
                                 }
@@ -205,8 +206,9 @@ class SmartAgentVpnService : VpnService() {
                 }
                 backend.setState(newTunnel, Tunnel.State.UP, config)
                 activeTunnel = newTunnel
+                activeTunnelFile = fileName
                 updateNotification("已连接 $targetTunnelName")
-                startStatsPollingIfNeeded(targetTunnelName, fileName)
+                startStatsPollingIfNeeded()
 
             } catch (e: Exception) {
 
@@ -231,6 +233,7 @@ class SmartAgentVpnService : VpnService() {
                 backend.setState(it, Tunnel.State.DOWN, null)
             }
             activeTunnel = null
+            activeTunnelFile = null
             stopStatsPolling()
             activeAppRuleVersion = null
             notifyState(
@@ -253,7 +256,10 @@ class SmartAgentVpnService : VpnService() {
         manager.notify(notificationId, createNotification(contentText))
     }
 
-    private fun pushStats(tunnelName: String, tunnelFile: String) {
+    private fun pushStats() {
+        val tunnel = activeTunnel ?: return
+        val tunnelFile = activeTunnelFile ?: return
+        val tunnelName = tunnel.name
         val stats = getStats()
         val peers = stats?.peers() ?: emptyArray()
         val peerStats = if (peers.isNotEmpty()) stats?.peer(peers.first()) else null
@@ -284,21 +290,18 @@ class SmartAgentVpnService : VpnService() {
         runCatching { backend.getStatistics(activeTunnel) }.getOrNull()
 
     private fun startStatsPollingFromState() {
-        val state = VpnStateRepository.vpnState.value
-        val name = state.tunnelName ?: return
-        val file = state.tunnelFile ?: return
-        startStatsPollingIfNeeded(name, file)
+        startStatsPollingIfNeeded()
     }
 
-    private fun startStatsPollingIfNeeded(tunnelName: String, tunnelFile: String) {
-        if (statsJob != null) return
+    private fun startStatsPollingIfNeeded() {
+        if (statsJob?.isActive == true) return
         if (activeTunnel == null) return
         if (!VpnStateRepository.hasUiListener) return
 
         statsJob?.cancel()
         statsJob = coroutineScope.launch(Dispatchers.IO) {
             while (activeTunnel != null && VpnStateRepository.hasUiListener) {
-                pushStats(tunnelName, tunnelFile)
+                pushStats()
                 delay(1000)
             }
         }
